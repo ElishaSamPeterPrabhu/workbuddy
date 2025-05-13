@@ -1,0 +1,17 @@
+# requirements.txt for WorkBuddy (Jarvis Assistant)
+# TODO: Keep dependencies in sync with modular structure and features.
+PyQt6
+pystray
+win10toast
+requests
+PyGithub
+google-api-python-client
+APScheduler
+pytest
+flake8
+black
+
+SpeechRecognition==3.10.0
+pyttsx3==2.90
+psutil==5.9.5
+pywin32==306 

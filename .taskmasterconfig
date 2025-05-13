@@ -1,0 +1,118 @@
+# .taskmasterconfig
+
+# 1) Global settings
+maxConcurrentTasks: 1          # run tasks one at a time
+defaultModel: "claude-3.5-instant"  
+
+# 2) Task definitions
+tasks:
+  - id: scaffold
+    description: "Scaffold new WinForms AI Tray project"
+    command: scaffold-project
+    params:
+      language: csharp
+      framework: winforms
+
+  - id: integrate_ai
+    description: "Add AIClient class and HTTP integration"
+    dependsOn: scaffold
+    command: add-file
+    params:
+      path: "AIClient.cs"
+      template: |
+        using System.Net.Http;
+        using System.Text;
+        using System.Text.Json;
+        using System.Threading.Tasks;
+
+        public class AIClient
+        {
+          // ... (your earlier code here) ...
+        }
+
+  - id: add_tray_icon
+    description: "Implement system tray icon and context menu"
+    dependsOn: integrate_ai
+    command: modify-file
+    params:
+      path: "Form1.cs"
+      snippet: |
+        // Insert NotifyIcon initialization in Form1 ctor
+        trayIcon = new NotifyIcon { /* ... */ };
+
+  - id: popup_form
+    description: "Create PopupForm for AI chat UI"
+    dependsOn: add_tray_icon
+    command: add-file
+    params:
+      path: "PopupForm.cs"
+      template: |
+        using System.Windows.Forms;
+        public class PopupForm : Form { /* ... simplified code ... */ }
+
+  - id: overlay_form
+    description: "Create OverlayForm with full-screen transparent layer"
+    dependsOn: popup_form
+    command: add-file
+    params:
+      path: "OverlayForm.cs"
+      template: |
+        using System.Windows.Forms;
+        public class OverlayForm : Form { /* ... overlay code ... */ }
+
+  - id: style_ui
+    description: "Apply rounded corners, colors, and loading spinner"
+    dependsOn: overlay_form
+    command: modify-file
+    params:
+      path: "OverlayForm.cs"
+      snippet: |
+        // Add Panel.Region = Region.FromHrgn(...);
+        // Add PictureBox with spinner.gif
+
+  - id: hide_main_form
+    description: "Ensure main Form1 is hidden at startup"
+    dependsOn: style_ui
+    command: modify-file
+    params:
+      path: "Form1.cs"
+      snippet: |
+        this.Hide();
+        this.ShowInTaskbar = false;
+
+  - id: write_tests
+    description: "Add unit tests for AIClient and tray logic"
+    dependsOn: hide_main_form
+    command: add-file
+    params:
+      path: "Tests/Form1Tests.cs"
+      template: |
+        [Fact] public void TrayIcon_IsVisible_WhenRunning() { /* ... */ }
+
+  - id: final_review
+    description: "Self-review generated code and polish"
+    dependsOn: write_tests
+    command: self-improve
+    params:
+      iterations: 2
+
+# 3) Built-in commands
+commands:
+  scaffold-project:
+    description: "Uses dotnet CLI to create a WinForms project"
+    run: "dotnet new winforms -n WorkBuddyTrayApp"
+
+  add-file:
+    description: "Create a new file from template"
+    run: "echo \"{template}\" > {path}"
+
+  modify-file:
+    description: "Insert or replace text in an existing file"
+    run: "cursor replace {path} --snippet \"{snippet}\""
+
+  self-improve:
+    description: "Run the self-improvement loop"
+    run: |
+      for i in $(seq 1 {params.iterations}); do
+        cursor self-improve;
+      done 
