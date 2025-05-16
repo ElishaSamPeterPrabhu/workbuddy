@@ -37,6 +37,7 @@ import dateutil.parser
 import difflib
 import logging
 from integrations.github import GitHubIntegration
+import fnmatch
 
 
 class WorkflowState:
@@ -95,10 +96,11 @@ class AIClient:
         # Trimble API setup
         self.assistant_id = "work-buddy"
         self.base_url = f"https://agw.construction-integration.trimble.cloud/trimbledeveloperprogram/assistants/v1/agents/{self.assistant_id}/messages"
-        self.access_token = os.environ.get(
-            "TRIMBLE_API_TOKEN",
-            "eyJhbGciOiJSUzI1NiIsImtpZCI6IjEiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2lkLnRyaW1ibGUuY29tIiwiZXhwIjoxNzQ1MzM3MTcwLCJuYmYiOjE3NDUzMzM1NzAsImlhdCI6MTc0NTMzMzU3MCwianRpIjoiYzdhM2ZmMDkxMmRiNGI0MmEzMWE1MDVjZTNkZmMyNzgiLCJqd3RfdmVyIjoyLCJzdWIiOiIwYzhkOGUwZC02MDU4LTQ2MGItYjExYS0xYTExMjE4NmFkNjQiLCJhcHBsaWNhdGlvbl9uYW1lIjoicmVsZWFzZS1ub3RlcyIsImlkZW50aXR5X3R5cGUiOiJhcHBsaWNhdGlvbiIsImF1dGhfdGltZSI6MTc0NTMzMzU3MCwiYW1yIjpbImNsaWVudF9jcmVkZW50aWFscyJdLCJhdWQiOlsiMGM4ZDhlMGQtNjA1OC00NjBiLWIxMWEtMWExMTIxODZhZDY0Il0sInNjb3BlIjoicmVsZWFzZS1ub3RlcyJ9.nrMAYOvxhZC6FLK_qHlJAWgWyx6flmPzaRFdbOwMl1qsW4he-eJetSpk7F3YL4_crjVYDpXtiJcKqNb2j-p5Qd-bHz8SOsyk_5h_T1gGq7xJw697CuCnB0HG_7ARVyb9lxL56BWegOoC3cot2UmZlXPSbiowJ92lbDQ0JcUpoAlAWJSr6rx7OsblZjAsr3hmDIMv1iDGjO4OZwkoZZSw_XuMowgTbckGsCnpnyO8PlsxYTTYTE1OqTCoJIRCK_pkEcdc6jh3O-lTKS8NELIjocLaXNJbzyKm_01ifpMZNNmuXO6CwTm7cW4sGIE18q1s2wiD8JO8qYHDFVwf0AgBGA",
-        )
+        # self.access_token = os.environ.get(
+        #     "TRIMBLE_API_TOKEN",
+        #     "eyJhbGciOiJSUzI1NiIsImtpZCI6IjEiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2lkLnRyaW1ibGUuY29tIiwiZXhwIjoxNzQ1MzM3MTcwLCJuYmYiOjE3NDUzMzM1NzAsImlhdCI6MTc0NTMzMzU3MCwianRpIjoiYzdhM2ZmMDkxMmRiNGI0MmEzMWE1MDVjZTNkZmMyNzgiLCJqd3RfdmVyIjoyLCJzdWIiOiIwYzhkOGUwZC02MDU4LTQ2MGItYjExYS0xYTExMjE4NmFkNjQiLCJhcHBsaWNhdGlvbl9uYW1lIjoicmVsZWFzZS1ub3RlcyIsImlkZW50aXR5X3R5cGUiOiJhcHBsaWNhdGlvbiIsImF1dGhfdGltZSI6MTc0NTMzMzU3MCwiYW1yIjpbImNsaWVudF9jcmVkZW50aWFscyJdLCJhdWQiOlsiMGM4ZDhlMGQtNjA1OC00NjBiLWIxMWEtMWExMTIxODZhZDY0Il0sInNjb3BlIjoicmVsZWFzZS1ub3RlcyJ9.nrMAYOvxhZC6FLK_qHlJAWgWyx6flmPzaRFdbOwMl1qsW4he-eJetSpk7F3YL4_crjVYDpXtiJcKqNb2j-p5Qd-bHz8SOsyk_5h_T1gGq7xJw697CuCnB0HG_7ARVyb9lxL56BWegOoC3cot2UmZlXPSbiowJ92lbDQ0JcUpoAlAWJSr6rx7OsblZjAsr3hmDIMv1iDGjO4OZwkoZZSw_XuMowgTbckGsCnpnyO8PlsxYTTYTE1OqTCoJIRCK_pkEcdc6jh3O-lTKS8NELIjocLaXNJbzyKm_01ifpMZNNmuXO6CwTm7cW4sGIE18q1s2wiD8JO8qYHDFVwf0AgBGA",
+        # )
+        self.access_token="eyJhbGciOiJSUzI1NiIsImtpZCI6IjEiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2lkLnRyaW1ibGUuY29tIiwiZXhwIjoxNzQ1MzM3MTcwLCJuYmYiOjE3NDUzMzM1NzAsImlhdCI6MTc0NTMzMzU3MCwianRpIjoiYzdhM2ZmMDkxMmRiNGI0MmEzMWE1MDVjZTNkZmMyNzgiLCJqd3RfdmVyIjoyLCJzdWIiOiIwYzhkOGUwZC02MDU4LTQ2MGItYjExYS0xYTExMjE4NmFkNjQiLCJhcHBsaWNhdGlvbl9uYW1lIjoicmVsZWFzZS1ub3RlcyIsImlkZW50aXR5X3R5cGUiOiJhcHBsaWNhdGlvbiIsImF1dGhfdGltZSI6MTc0NTMzMzU3MCwiYW1yIjpbImNsaWVudF9jcmVkZW50aWFscyJdLCJhdWQiOlsiMGM4ZDhlMGQtNjA1OC00NjBiLWIxMWEtMWExMTIxODZhZDY0Il0sInNjb3BlIjoicmVsZWFzZS1ub3RlcyJ9.nrMAYOvxhZC6FLK_qHlJAWgWyx6flmPzaRFdbOwMl1qsW4he-eJetSpk7F3YL4_crjVYDpXtiJcKqNb2j-p5Qd-bHz8SOsyk_5h_T1gGq7xJw697CuCnB0HG_7ARVyb9lxL56BWegOoC3cot2UmZlXPSbiowJ92lbDQ0JcUpoAlAWJSr6rx7OsblZjAsr3hmDIMv1iDGjO4OZwkoZZSw_XuMowgTbckGsCnpnyO8PlsxYTTYTE1OqTCoJIRCK_pkEcdc6jh3O-lTKS8NELIjocLaXNJbzyKm_01ifpMZNNmuXO6CwTm7cW4sGIE18q1s2wiD8JO8qYHDFVwf0AgBGA"
         self.headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
@@ -107,6 +109,50 @@ class AIClient:
         # For session tracking
         self.session_id = "session_id1"
         self.interlocutor_id = "interlocutor_id"
+
+        # Add system prompt with instructions for file search phases
+        self.system_prompt = """
+You are TARS, a helpful desktop assistant that can perform various tasks including file searches.
+
+When searching for files, you will use a phased approach:
+1. First, a quick search is performed in high-priority locations
+2. If files are found, you'll show the results
+3. If the quick search times out, you'll need to decide based on the user's message whether to:
+   a) Continue with a more extensive search (which takes longer but searches more locations)
+   b) Ask for more specific information to narrow the search
+   c) Try searching in a different location
+
+For file search operations, respond with JSON in this format:
+```json
+{
+  "action": "convo",
+  "is_reminder": false,
+  "ai_response": "I'll search for that file for you.",
+  "file_search": {
+    "action": "search_files_recursive",
+    "directory": "C:\\",
+    "pattern": "example*.txt"
+  }
+}
+```
+
+When the user asks about previous search results or file locations, use the context provided to give details about where files were found.
+
+When the user wants to continue a search, include a "continue_search" field in your JSON response:
+```json
+{
+  "action": "convo",
+  "is_reminder": false,
+  "ai_response": "I'll continue searching in more locations.",
+  "file_search": {
+    "action": "search_files_recursive",
+    "directory": "C:\\",
+    "pattern": "example*.txt",
+    "continue_search": true
+  }
+}
+```
+"""
 
         # Simple fallback responses when no API connection is available
         self.fallback_responses: dict[str, str] = {
@@ -169,41 +215,86 @@ class AIClient:
             return {"file_details": {}, "rag_answer": f"Error: {str(e)}"}
 
     def get_response(self, user_message: str) -> str:
-        print(f"DEBUG: AIClient.get_response received: '{user_message}'")
         """
-        Get a response from the AI model or generate a fallback response.
+        Get a response from the AI model based on the user's message.
 
         Args:
             user_message: The user's message string.
 
         Returns:
-            The AI's response as a string.
+            The AI's response string.
         """
-        # Check if we need to handle a system command
-        system_response = self.handle_system_command(user_message)
-        if system_response:
-            return system_response
-
         try:
-            # Create a state object for the rag_qa function
-            state = WorkflowState(
-                user_query=user_message, retrieved_docs=[Document(page_content="")]
-            )
+            # Prevent recursion - don't process messages that come from internal context operations
+            if user_message.startswith("Here is the requested data") or "Context about previous file search" in user_message:
+                print("DEBUG: Skipping internal context message to prevent recursion")
+                # Just send the raw message to the API without additional context
+                raw_answer = self.call_ai_model_direct(user_message)
+                return raw_answer or self.get_fallback_response(user_message)
+            
+            # Handle special commands first
+            if "|debug:" in user_message.lower():
+                # Debug command for development/testing
+                debug_cmd = user_message.split("|debug:")[1].strip()
+                return f"[DEBUG] Command received: {debug_cmd}"
 
-            # Get response from the AI
-            result = self.rag_qa(state)
+            # Check for system commands
+            system_response = self.handle_system_command(user_message)
+            if system_response:
+                return system_response
 
-            if result and result.get("rag_answer"):
-                raw_answer = result["rag_answer"]
-                # Extract JSON block from markdown-style code block
-                match = re.search(r"```json\s*(\{.*?\})\s*```", raw_answer, re.DOTALL)
-                if match:
-                    json_str = match.group(1)
+            # Add timestamp to the prompt
+            current_time = self.get_current_iso_time()
+            
+            # Add context about the last files found if this looks like a followup question
+            context_instruction = ""
+            if hasattr(self, 'last_search_context_str') and any(keyword in user_message.lower() for keyword in 
+                      ["where", "which directory", "full path", "location", "where is", "what directory"]):
+                context_instruction = f"\nContext about previous file search: {self.last_search_context_str}\n"
+
+            # Format the prompt with system instructions and user message
+            prompt = getattr(self, "system_prompt", "") + f"\nCurrent time: {current_time}{context_instruction}\n\nUser: {user_message}\nAssistant: "
+
+            # Call the AI model
+            raw_answer = self.call_ai_model_direct(prompt)
+            
+            # If the raw_answer is None, return a fallback response
+            if not raw_answer:
+                return self.get_fallback_response(user_message)
+
+            # Try to extract JSON from the response
+            if isinstance(raw_answer, str):
+                # Check if the response contains a JSON block
+                json_match = re.search(r"```json\s*(.*?)\s*```", raw_answer, re.DOTALL)
+                if json_match:
+                    # Extract the JSON string
+                    json_str = json_match.group(1).strip()
                     try:
+                        # Parse the JSON
                         response_json = json.loads(json_str)
-                        # Strictly handle only single-object action-based workflow
+                        # Handle file search action
+                        if "file_search" in response_json:
+                            # We're returning the full JSON for the UI to handle file search
+                            # When the AI returns "Unknown data_type", it means the UI should handle
+                            # the file search results with natural language
+                            json_str = json.dumps(response_json)  # Ensure clean JSON
+                            # Make sure the ai_response includes a natural language fallback
+                            if response_json.get("ai_response") == "Unknown data_type requested: file_search_results":
+                                response_json["ai_response"] = "I've located some files that may be what you're looking for."
+                                json_str = json.dumps(response_json)
+                            return json_str
+                        # Handle convo action
+                        elif response_json.get("action") == "convo":
+                            # IMPORTANT: If it has file_search field, return the entire JSON instead of just the ai_response
+                            if "file_search" in response_json:
+                                print(f"DEBUG: Found file_search in response_json: {response_json['file_search']}")
+                                # Return the full JSON string for processing by the UI
+                                if not response_json.get("ai_response"):
+                                    response_json["ai_response"] = "Let me search for that file for you."
+                                return json.dumps(response_json)
+                            return response_json.get("ai_response", raw_answer)
                         # Handle request_data action
-                        if response_json.get("action") == "request_data":
+                        elif response_json.get("action") == "request_data":
                             data_type = response_json.get("data_type")
                             data = None
                             if data_type == "reminders":
@@ -341,9 +432,6 @@ class AIClient:
                                 # Parse ISO datetime string to datetime object
                                 remind_at_dt = dateutil.parser.isoparse(remind_at)
                                 scheduler.schedule_reminder(message, remind_at_dt)
-                        # Handle convo action
-                        elif response_json.get("action") == "convo":
-                            return response_json.get("ai_response", raw_answer)
                         # Handle GitHub actions
                         elif response_json.get("action") == "github_notifications":
                             notifications = self.github_integration.get_notifications()
@@ -615,6 +703,37 @@ class AIClient:
 
     def call_ai_model(self, prompt: str) -> str:
         """
-        Use the existing get_response method to send the prompt to the backend.
+        Use the direct method to prevent recursion.
         """
-        return self.get_response(prompt)
+        return self.call_ai_model_direct(prompt)
+
+    def call_ai_model_direct(self, prompt: str) -> str:
+        """
+        Direct call to the AI model without recursively calling get_response.
+        """
+        try:
+            # Prepare the message for direct API call
+            current_time = self.get_current_iso_time()
+            body = {
+                "message": prompt,
+                "session_id": self.session_id,
+                "interlocutor_id": self.interlocutor_id,
+                "stream": False,
+                "model_id": self.model_name,
+            }
+
+            # Make the API request
+            response = requests.post(
+                self.base_url, headers=self.headers, data=json.dumps(body)
+            )
+
+            # Parse the response
+            if response.status_code == 200:
+                result = response.json().get("message", "")
+                return result
+            else:
+                print(f"API Error: {response.status_code}")
+                return ""
+        except Exception as e:
+            print(f"Error in direct AI model call: {str(e)}")
+            return ""

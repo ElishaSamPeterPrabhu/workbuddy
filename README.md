@@ -20,13 +20,16 @@ A modern, AI-powered desktop assistant for software engineers, built with Python
 ```
 WorkBuddyPython/
   main.py                # Entry point
-  /ui/                   # PyQt6 UI components (overlay, dialogs)
-  /core/                 # Core logic (memory, notifications, scheduler, settings)
+  /ui/                   # PyQt6 UI components (overlay, tray)
+  /core/                 # Core logic (ai_client, file search, storage, notifications, scheduler)
   /integrations/         # Integrations (github, calendar)
   /assets/               # Icons, images
   /tests/                # Pytest-based tests
+  /config/               # Configuration files
   requirements.txt       # Dependencies
   setup.py               # Packaging/build
+  setup_startup.py       # Configure autostart
+  run_workbuddy.bat      # Windows batch file to run the app
   README.md              # This file
 ```
 
@@ -118,8 +121,10 @@ This will:
 
 You can customize the appearance and behavior by modifying the following files:
 
-- `main.py` - Main application logic and UI
-- `ai_client.py` - AI response generation and commands
+- `main.py` - Main application logic
+- `ui/overlay.py` - Chat UI and appearance
+- `ui/tray.py` - System tray integration
+- `core/ai_client.py` - AI response generation and commands
 - `.taskmasterconfig` - Task definitions and configuration
 
 ## Future Enhancements
@@ -142,4 +147,116 @@ MIT
 
 ## Credits
 
-Created for workplace productivity enhancement. 
+Created for workplace productivity enhancement.
+
+# WorkBuddy File Search
+
+This project implements an advanced file search system for the WorkBuddy assistant, powered by the Everything SDK.
+
+## Features
+
+- **Natural Language File Search**: Ask for files in plain English
+- **Lightning-Fast Results**: Uses Everything SDK for near-instant file search
+- **Advanced Filtering**: Search by file type, size, date modified, and more
+- **AI Integration**: Seamlessly connects with AI assistant workflows
+- **Graceful Fallback**: Falls back to standard file system search if Everything isn't installed
+
+## Dependencies
+
+- Python 3.8+
+- `pyeverything` - Python wrapper for the Everything SDK
+- Everything Search Engine - Free utility from voidtools (https://www.voidtools.com/)
+
+## Installation
+
+1. Install the Everything Search Engine from https://www.voidtools.com/
+2. Install the Python dependencies:
+
+```bash
+pip install pyeverything
+```
+
+## Usage
+
+### Command Line Testing
+
+You can test the file search functionality using the included test scripts:
+
+```bash
+# Show example queries
+python -m tests.test_file_search --examples
+
+# Search using natural language
+python -m tests.test_file_search --query "Find PDF files in Documents"
+
+# Use a JSON command
+python -m tests.test_file_search --command '{"action": "list_files", "directory": "C:/Users/username/Desktop", "pattern": "*.txt"}'
+
+# Compare search methods
+python -m tests.test_compare_search_methods --examples
+
+# Test prioritized search
+python -m tests.test_search_navigator --examples
+
+# Interactive file search testing
+python -m tests.test_real_file_search
+```
+
+### Integration with AI Assistant
+
+The file search system is designed to integrate with AI workflows:
+
+```python
+from core.ai_file_search_handler import file_search_handler
+
+# Process a natural language query
+response = file_search_handler.natural_language_search("Find Excel files created last week")
+print(response)
+
+# Process a command from the AI
+command = {
+    "action": "search_files_recursive",
+    "directory": "C:/Users/username/Documents",
+    "pattern": "*.pdf"
+}
+results = file_search_handler.process_ai_command(command)
+```
+
+## Architecture
+
+The system consists of three main components:
+
+1. **EverythingSearch** (`everything_search.py`) - Wrapper for the Everything SDK
+2. **FileSearchAdapter** (`file_search_adapter.py`) - Translates queries to search parameters
+3. **AIFileSearchHandler** (`ai_file_search_handler.py`) - Handles AI integration
+
+## Example Queries
+
+The system understands a wide range of natural language queries:
+
+- "Find PDF files in Documents"
+- "Show me text files on my Desktop"
+- "Find files larger than 10MB"
+- "Search for files modified today"
+- "Look for files with 'report' in the name"
+- "Show me images from last week"
+- "Find Excel files in Downloads"
+
+## Supported Commands
+
+The system supports the following JSON commands:
+
+```json
+{"action": "list_folders", "directory": "C:/Path/To/Directory"}
+{"action": "list_files", "directory": "C:/Path/To/Directory", "pattern": "*.txt"}
+{"action": "search_files_recursive", "directory": "C:/Path/To/Directory", "pattern": "*.pdf"}
+{"action": "file_exists", "path": "C:/Path/To/File.txt"}
+{"action": "folder_exists", "path": "C:/Path/To/Folder"}
+{"action": "process_query", "query": "Find large files in Documents"}
+```
+
+## Notes
+
+- Everything SDK must be installed and running for optimal performance
+- The system will fall back to standard file system search if Everything is not available
+- Content search requires Everything with content indexing enabled 

@@ -1,3 +1,8 @@
+"""
+Test script for running shell commands.
+Provides a cross-platform way to execute shell commands in tests.
+"""
+
 import os
 import platform
 import shlex
@@ -9,8 +14,17 @@ from typing import Any, Dict, Optional
 def run_shell_command(
     command: str, cwd: Optional[str] = None, timeout: int = 30
 ) -> Dict[str, Any]:
-    import os
-
+    """
+    Run a shell command and return its output.
+    
+    Args:
+        command: Command string to execute
+        cwd: Working directory (optional)
+        timeout: Timeout in seconds
+        
+    Returns:
+        Dictionary with stdout, stderr, and return code
+    """
     print(f"Running shell command: {command}")
     print(f"Working directory: {cwd or 'current'}")
     start_time = time.time()
@@ -64,4 +78,4 @@ if __name__ == "__main__":
     command = "dir"
     cwd = "C:\\Users\\eprabhu\\Desktop"
     result = run_shell_command(command, cwd)
-    print(result)
+    print(result) 

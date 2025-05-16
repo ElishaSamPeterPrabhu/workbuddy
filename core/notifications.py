@@ -1,5 +1,5 @@
 """
-Notification module for WorkBuddy (Jarvis Assistant).
+Notification module for WorkBuddy.
 
 Handles Windows toast notifications with custom app name and icon using winotify.
 """
@@ -36,4 +36,4 @@ def show_notification(title: str, message: str, icon_path: Optional[str] = None)
         return 0
     except Exception as e:
         print(f"Notification error: {e}")
-        return 1
+        return 1 

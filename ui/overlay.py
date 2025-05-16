@@ -27,10 +27,14 @@ from PyQt6.QtGui import QColor, QPalette, QTextCursor
 from core.ai_client import AIClient
 from core import storage
 from core import scheduler
+from core.ai_file_search_handler import AIFileSearchHandler
 import logging
 import getpass
 import datetime
 import dateutil.parser
+import json
+import re
+import os
 
 
 class AIWorker(QThread):
@@ -46,8 +50,21 @@ class AIWorker(QThread):
         self.user_text = user_text
 
     def run(self) -> None:
+        print(f"DEBUG: AIWorker.run() - getting response for: {self.user_text}")
         response = self.ai_client.get_response(self.user_text)
-        self.result_ready.emit(response)
+        print(f"DEBUG: AIWorker.run() - raw response from ai_client: {response}")
+        
+        # Try to see if the response is already JSON
+        try:
+            # Try parsing response as JSON
+            json_obj = json.loads(response)
+            print(f"DEBUG: AIWorker.run() - parsed response as JSON: {json_obj}")
+            # If it parses as JSON, wrap it in ```json ``` to signal it's JSON
+            self.result_ready.emit(f"```json\n{response}\n```")
+        except json.JSONDecodeError:
+            # Not JSON, pass through as is
+            print("DEBUG: AIWorker.run() - response is not JSON, passing through as is")
+            self.result_ready.emit(response)
 
 
 class RemindersDialog(QDialog):
@@ -219,7 +236,13 @@ class OverlayWindow(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setModal(True)
         self.ai_client = AIClient()
+        self.file_search_handler = AIFileSearchHandler(self.ai_client)
+        print("DEBUG: Connected AI client to file search handler")
         self._ai_worker: Optional[AIWorker] = None
+        # Store last search results for context in follow-up queries
+        self.last_search_results = []
+        self.pending_search_command = None
+        self.waiting_for_search_confirmation = False
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -352,6 +375,8 @@ class OverlayWindow(QDialog):
         print(f"DEBUG: user_text sent: '{user_text}'")
         if not user_text:
             return
+            
+        # Let the AI handle all decisions naturally
         self.input_box.clear()
         self._append_user_message(user_text)
         self._append_ai_message("<i>Thinking...</i>")
@@ -378,6 +403,7 @@ class OverlayWindow(QDialog):
         """
         Display the AI's response in the chat display.
         """
+        print(f"DEBUG: _on_ai_response received raw response: {response}")
         # Remove the last 'Thinking...' message if present
         cursor = self.response_display.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
@@ -387,19 +413,168 @@ class OverlayWindow(QDialog):
             cursor.removeSelectedText()
             cursor.deletePreviousChar()
             self.response_display.setTextCursor(cursor)
-        # Extract ai_response from JSON if present
-        import re, json
-
-        match = re.search(r"```json\s*(\{.*?\})\s*```", response, re.DOTALL)
-        if match:
-            try:
-                response_json = json.loads(match.group(1))
-                ai_message = response_json.get("ai_response", response)
-            except Exception:
-                ai_message = response
-        else:
-            ai_message = response
-        self._append_ai_message(ai_message)
+            
+        # First, try to parse the entire response as JSON directly
+        try:
+            response_json = json.loads(response)
+            print(f"DEBUG: Parsed entire response as JSON: {response_json}")
+            # Process as JSON
+            ai_message = response_json.get("ai_response", response)
+            if "file_search" in response_json:
+                file_search_cmd = response_json["file_search"]
+                if isinstance(file_search_cmd, dict) and "action" in file_search_cmd:
+                    print(f"DEBUG: Processing file search command: {file_search_cmd}")
+                    results = self.file_search_handler.process_ai_command(file_search_cmd)
+                    print(f"DEBUG: File search results: {results}")
+                    
+                    # Check if this is a phased search result that requires user confirmation
+                    if results.get("search_phase") == "quick_timeout":
+                        # This is a timeout from the quick search phase
+                        # Save the original command for later continuation
+                        self.pending_search_command = results.get("original_command")
+                        
+                        # Modify the AI response to ask the user if they want to continue searching
+                        ai_message += f"\n\nI've done a quick search but haven't found any matches yet. Would you like me to search more extensively? (This could take longer)"
+                        
+                        # Remember that we're waiting for confirmation to continue search
+                        self.waiting_for_search_confirmation = True
+                        self._append_ai_message(ai_message)
+                        return
+                    
+                    if results.get("success"):
+                        if "count" in results and results["count"] > 0:
+                            if "files" in results:
+                                # Store results for future reference
+                                self.last_search_results = results["files"]
+                                
+                                # Create a simple string summary of search results for AI context
+                                found_files_string = ""
+                                if len(results["files"]) == 1:
+                                    filepath = results["files"][0]
+                                    filename = os.path.basename(filepath)
+                                    directory = os.path.dirname(filepath)
+                                    found_files_string = f"Found the file '{filename}' at location: {filepath}"
+                                else:
+                                    found_files_string = f"Found {len(results['files'])} files matching '{file_search_cmd.get('pattern', '')}' in {file_search_cmd.get('directory', '')}"
+                                    
+                                # Pass the simplified search context to the AI client
+                                self.ai_client.last_search_context_str = found_files_string
+                                
+                                # Display both full path and filename for better context
+                                files_list = []
+                                for file_path in results["files"][:10]:
+                                    filename = os.path.basename(file_path)
+                                    directory = os.path.dirname(file_path)
+                                    files_list.append(f"- {filename} (located in {directory})")
+                                    
+                                if len(results["files"]) > 10:
+                                    files_list.append(f"...and {len(results['files']) - 10} more files")
+                                
+                                files_text = "\n".join(files_list)
+                                ai_message += f"\n\n{found_files_string}\n\n{files_text}"
+                            else:
+                                ai_message += f"\n\nFound {results['count']} items."
+                        else:
+                            ai_message += "\n\nNo files found matching your criteria."
+                    else:
+                        ai_message += f"\n\nSearch error: {results.get('error', 'Unknown error')}"
+            self._append_ai_message(ai_message)
+            return
+        except json.JSONDecodeError:
+            print("DEBUG: Response is not direct JSON, trying to extract JSON from code block")
+        
+        # If the entire response is not JSON, try to extract JSON from code blocks
+        # Look for JSON in code blocks (use multiple patterns to be thorough)
+        patterns = [
+            r'```json\s*(.*?)\s*```',  # Standard markdown JSON block
+            r'```\s*(\{.*?\})\s*```',  # Any code block containing JSON object
+            r'\{.*?\}'                 # Simple pattern to find JSON objects
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, response, re.DOTALL)
+            if matches:
+                print(f"DEBUG: Found JSON match with pattern: {pattern}")
+                for match_text in matches:
+                    try:
+                        json_text = match_text.strip()
+                        print(f"DEBUG: Attempting to parse JSON: {json_text[:100]}...")
+                        response_json = json.loads(json_text)
+                        print(f"DEBUG: Successfully parsed JSON: {response_json}")
+                        
+                        ai_message = response_json.get("ai_response", response)
+                        
+                        # Handle file search actions if present
+                        if "file_search" in response_json:
+                            print(f"DEBUG: File search field found: {response_json['file_search']}")
+                            file_search_cmd = response_json["file_search"]
+                            if isinstance(file_search_cmd, dict) and "action" in file_search_cmd:
+                                print(f"DEBUG: Processing file search command: {file_search_cmd}")
+                                
+                                # Check if this is a continued search
+                                continue_search = file_search_cmd.get("continue_search", False)
+                                if continue_search:
+                                    # Use longer timeout for continued searches
+                                    search_timeout = 30  # 30 seconds for extended searches
+                                    print(f"DEBUG: This is a continued search with timeout={search_timeout}s")
+                                    # Store this in the search context
+                                    file_search_cmd["extended_search"] = True
+                                else:
+                                    search_timeout = 5  # 5 seconds for quick initial searches
+                                    print(f"DEBUG: This is a regular search with timeout={search_timeout}s")
+                                    
+                                # Process the command with the appropriate timeout
+                                results = self.file_search_handler.process_ai_command(file_search_cmd, search_timeout)
+                                print(f"DEBUG: File search results: {results}")
+                                
+                                # Process the search results
+                                if results.get("success"):
+                                    if "count" in results and results["count"] > 0:
+                                        if "files" in results:
+                                            # Store results for future reference
+                                            self.last_search_results = results["files"]
+                                            
+                                            # Create a simple string summary of search results for AI context
+                                            found_files_string = ""
+                                            if len(results["files"]) == 1:
+                                                filepath = results["files"][0]
+                                                filename = os.path.basename(filepath)
+                                                directory = os.path.dirname(filepath)
+                                                found_files_string = f"Found the file '{filename}' at location: {filepath}"
+                                            else:
+                                                found_files_string = f"Found {len(results['files'])} files matching '{file_search_cmd.get('pattern', '')}' in {file_search_cmd.get('directory', '')}"
+                                                
+                                            # Pass the simplified search context to the AI client
+                                            self.ai_client.last_search_context_str = found_files_string
+                                            
+                                            # Display both full path and filename for better context
+                                            files_list = []
+                                            for file_path in results["files"][:10]:
+                                                filename = os.path.basename(file_path)
+                                                directory = os.path.dirname(file_path)
+                                                files_list.append(f"- {filename} (located in {directory})")
+                                                
+                                            if len(results["files"]) > 10:
+                                                files_list.append(f"...and {len(results['files']) - 10} more files")
+                                            
+                                            files_text = "\n".join(files_list)
+                                            ai_message += f"\n\n{found_files_string}\n\n{files_text}"
+                                        else:
+                                            ai_message += f"\n\nFound {results['count']} items."
+                                    else:
+                                        ai_message += "\n\nNo files found matching your criteria."
+                                else:
+                                    ai_message += f"\n\nSearch error: {results.get('error', 'Unknown error')}"
+                        
+                        self._append_ai_message(ai_message)
+                        return
+                    except json.JSONDecodeError as e:
+                        print(f"DEBUG: JSON parse error: {e}")
+                        continue
+        
+        # If we get here, no JSON was found or parsed successfully
+        print("DEBUG: No valid JSON found in response, displaying raw response")
+        self._append_ai_message(response)
 
     def _on_ai_worker_finished(self) -> None:
         """
@@ -414,5 +589,72 @@ class OverlayWindow(QDialog):
         dlg = RemindersDialog(self)
         dlg.refresh_reminders()
         dlg.exec()
+
+    def _run_extended_search(self) -> None:
+        """
+        Run the extended search based on the pending command.
+        This is called when the user confirms they want to continue searching.
+        """
+        try:
+            if not self.pending_search_command:
+                print("ERROR: No pending search command to continue")
+                self.result_ready.emit("I'm sorry, I lost track of what we were searching for. Could you please try again?")
+                return
+                
+            # Call the continue_search method to perform extended search
+            results = self.file_search_handler.continue_search(self.pending_search_command)
+            print(f"DEBUG: Extended search results: {results}")
+            
+            # Process results similar to regular search
+            if results.get("success"):
+                pattern = self.pending_search_command.get("pattern", "")
+                directory = self.pending_search_command.get("directory", "")
+                
+                if results.get("count", 0) > 0 and "files" in results:
+                    # Store results for future reference
+                    self.last_search_results = results["files"]
+                    
+                    # Create a simple string summary for AI context
+                    found_files_string = ""
+                    if len(results["files"]) == 1:
+                        filepath = results["files"][0]
+                        filename = os.path.basename(filepath)
+                        directory = os.path.dirname(filepath)
+                        found_files_string = f"Found the file '{filename}' at location: {filepath}"
+                    else:
+                        found_files_string = f"Found {len(results['files'])} files matching '{pattern}' in {directory}"
+                        
+                    # Save context for follow-up questions
+                    self.ai_client.last_search_context_str = found_files_string
+                    
+                    # Format files for display
+                    files_list = []
+                    for file_path in results["files"][:10]:
+                        filename = os.path.basename(file_path)
+                        directory = os.path.dirname(file_path)
+                        files_list.append(f"- {filename} (located in {directory})")
+                        
+                    if len(results["files"]) > 10:
+                        files_list.append(f"...and {len(results['files']) - 10} more files")
+                    
+                    files_text = "\n".join(files_list)
+                    response = f"After a more extensive search, I {found_files_string}\n\n{files_text}"
+                else:
+                    response = f"I've completed a more extensive search, but I still couldn't find any files matching '{pattern}' in {directory}."
+            else:
+                response = f"The extended search encountered an error: {results.get('error', 'Unknown error')}"
+                
+            # Clear the pending command
+            self.pending_search_command = None
+            
+            # Update the UI with results
+            self._append_ai_message(response)
+            
+        except Exception as e:
+            import traceback
+            print(f"ERROR in extended search: {e}")
+            print(traceback.format_exc())
+            self._append_ai_message(f"Sorry, there was an error during the extended search: {str(e)}")
+            self.pending_search_command = None
 
     # TODO: Add methods for integrating with the AI client and updating chat
