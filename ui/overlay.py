@@ -35,6 +35,12 @@ import dateutil.parser
 import json
 import re
 import os
+import io
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Union
 
 
 class AIWorker(QThread):
@@ -566,6 +572,9 @@ class OverlayWindow(QDialog):
         if not user_text:
             return
             
+        # Store the user's text for context in reminder processing
+        self.user_text = user_text
+            
         # Let the AI handle all decisions naturally
         self.input_box.clear()
         self._append_user_message(user_text)
@@ -610,7 +619,8 @@ class OverlayWindow(QDialog):
         """
         Display the AI's response in the chat display.
         """
-        print(f"DEBUG: _on_ai_response received raw response: {response}")
+        print(f"DEBUG: _on_ai_response received raw response: {response[:100]}...")
+        
         # Remove the last 'Thinking...' message if present
         cursor = self.response_display.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
@@ -620,168 +630,119 @@ class OverlayWindow(QDialog):
             cursor.removeSelectedText()
             cursor.deletePreviousChar()
             self.response_display.setTextCursor(cursor)
-            
-        # First, try to parse the entire response as JSON directly
-        try:
-            response_json = json.loads(response)
-            print(f"DEBUG: Parsed entire response as JSON: {response_json}")
-            # Process as JSON
-            ai_message = response_json.get("ai_response", response)
-            if "file_search" in response_json:
-                file_search_cmd = response_json["file_search"]
-                if isinstance(file_search_cmd, dict) and "action" in file_search_cmd:
-                    print(f"DEBUG: Processing file search command: {file_search_cmd}")
-                    results = self.file_search_handler.process_ai_command(file_search_cmd)
-                    print(f"DEBUG: File search results: {results}")
-                    
-                    # Check if this is a phased search result that requires user confirmation
-                    if results.get("search_phase") == "quick_timeout":
-                        # This is a timeout from the quick search phase
-                        # Save the original command for later continuation
-                        self.pending_search_command = results.get("original_command")
-                        
-                        # Modify the AI response to ask the user if they want to continue searching
-                        ai_message += f"\n\nI've done a quick search but haven't found any matches yet. Would you like me to search more extensively? (This could take longer)"
-                        
-                        # Remember that we're waiting for confirmation to continue search
-                        self.waiting_for_search_confirmation = True
-                        self._append_ai_message(ai_message)
-                        return
-                    
-                    if results.get("success"):
-                        if "count" in results and results["count"] > 0:
-                            if "files" in results:
-                                # Store results for future reference
-                                self.last_search_results = results["files"]
-                                
-                                # Create a simple string summary of search results for AI context
-                                found_files_string = ""
-                                if len(results["files"]) == 1:
-                                    filepath = results["files"][0]
-                                    filename = os.path.basename(filepath)
-                                    directory = os.path.dirname(filepath)
-                                    found_files_string = f"Found the file '{filename}' at location: {filepath}"
-                                else:
-                                    found_files_string = f"Found {len(results['files'])} files matching '{file_search_cmd.get('pattern', '')}' in {file_search_cmd.get('directory', '')}"
-                                    
-                                # Pass the simplified search context to the AI client
-                                self.ai_client.last_search_context_str = found_files_string
-                                
-                                # Display both full path and filename for better context
-                                files_list = []
-                                for file_path in results["files"][:10]:
-                                    filename = os.path.basename(file_path)
-                                    directory = os.path.dirname(file_path)
-                                    files_list.append(f"- {filename} (located in {directory})")
-                                    
-                                if len(results["files"]) > 10:
-                                    files_list.append(f"...and {len(results['files']) - 10} more files")
-                                
-                                files_text = "\n".join(files_list)
-                                ai_message += f"\n\n{found_files_string}\n\n{files_text}"
-                            else:
-                                ai_message += f"\n\nFound {results['count']} items."
-                        else:
-                            ai_message += "\n\nNo files found matching your criteria."
-                    else:
-                        ai_message += f"\n\nSearch error: {results.get('error', 'Unknown error')}"
-            self._append_ai_message(ai_message)
-            return
-        except json.JSONDecodeError:
-            print("DEBUG: Response is not direct JSON, trying to extract JSON from code block")
         
-        # If the entire response is not JSON, try to extract JSON from code blocks
-        # Look for JSON in code blocks (use multiple patterns to be thorough)
-        patterns = [
-            r'```json\s*(.*?)\s*```',  # Standard markdown JSON block
-            r'```\s*(\{.*?\})\s*```',  # Any code block containing JSON object
-            r'\{.*?\}'                 # Simple pattern to find JSON objects
-        ]
+        # Clear out any markdown code block formatting, etc.
+        # This is the main fix to handle the JSON formatting issue
+        cleaned_response = response
         
-        for pattern in patterns:
-            matches = re.findall(pattern, response, re.DOTALL)
-            if matches:
-                print(f"DEBUG: Found JSON match with pattern: {pattern}")
-                for match_text in matches:
+        # First look for ```json blocks specifically
+        json_block_pattern = r'```json\s*(.*?)\s*```'
+        json_blocks = re.findall(json_block_pattern, response, re.DOTALL)
+        if json_blocks:
+            print(f"DEBUG: Found {len(json_blocks)} JSON code blocks")
+            # Use the first JSON block found
+            cleaned_response = json_blocks[0].strip()
+            print(f"DEBUG: Extracted JSON from code block: {cleaned_response[:100]}...")
+        else:
+            # Try other patterns to find JSON objects
+            code_block_pattern = r'```\s*(.*?)\s*```'
+            code_blocks = re.findall(code_block_pattern, response, re.DOTALL)
+            if code_blocks:
+                # Check if any code block contains valid JSON
+                for block in code_blocks:
                     try:
-                        json_text = match_text.strip()
-                        print(f"DEBUG: Attempting to parse JSON: {json_text[:100]}...")
-                        response_json = json.loads(json_text)
-                        print(f"DEBUG: Successfully parsed JSON: {response_json}")
-                        
-                        ai_message = response_json.get("ai_response", response)
-                        
-                        # Handle file search actions if present
-                        if "file_search" in response_json:
-                            print(f"DEBUG: File search field found: {response_json['file_search']}")
-                            file_search_cmd = response_json["file_search"]
-                            if isinstance(file_search_cmd, dict) and "action" in file_search_cmd:
-                                print(f"DEBUG: Processing file search command: {file_search_cmd}")
-                                
-                                # Check if this is a continued search
-                                continue_search = file_search_cmd.get("continue_search", False)
-                                if continue_search:
-                                    # Use longer timeout for continued searches
-                                    search_timeout = 30  # 30 seconds for extended searches
-                                    print(f"DEBUG: This is a continued search with timeout={search_timeout}s")
-                                    # Store this in the search context
-                                    file_search_cmd["extended_search"] = True
-                                else:
-                                    search_timeout = 5  # 5 seconds for quick initial searches
-                                    print(f"DEBUG: This is a regular search with timeout={search_timeout}s")
-                                    
-                                # Process the command with the appropriate timeout
-                                results = self.file_search_handler.process_ai_command(file_search_cmd, search_timeout)
-                                print(f"DEBUG: File search results: {results}")
-                                
-                                # Process the search results
-                                if results.get("success"):
-                                    if "count" in results and results["count"] > 0:
-                                        if "files" in results:
-                                            # Store results for future reference
-                                            self.last_search_results = results["files"]
-                                            
-                                            # Create a simple string summary of search results for AI context
-                                            found_files_string = ""
-                                            if len(results["files"]) == 1:
-                                                filepath = results["files"][0]
-                                                filename = os.path.basename(filepath)
-                                                directory = os.path.dirname(filepath)
-                                                found_files_string = f"Found the file '{filename}' at location: {filepath}"
-                                            else:
-                                                found_files_string = f"Found {len(results['files'])} files matching '{file_search_cmd.get('pattern', '')}' in {file_search_cmd.get('directory', '')}"
-                                                
-                                            # Pass the simplified search context to the AI client
-                                            self.ai_client.last_search_context_str = found_files_string
-                                            
-                                            # Display both full path and filename for better context
-                                            files_list = []
-                                            for file_path in results["files"][:10]:
-                                                filename = os.path.basename(file_path)
-                                                directory = os.path.dirname(file_path)
-                                                files_list.append(f"- {filename} (located in {directory})")
-                                                
-                                            if len(results["files"]) > 10:
-                                                files_list.append(f"...and {len(results['files']) - 10} more files")
-                                            
-                                            files_text = "\n".join(files_list)
-                                            ai_message += f"\n\n{found_files_string}\n\n{files_text}"
-                                        else:
-                                            ai_message += f"\n\nFound {results['count']} items."
-                                    else:
-                                        ai_message += "\n\nNo files found matching your criteria."
-                                else:
-                                    ai_message += f"\n\nSearch error: {results.get('error', 'Unknown error')}"
-                        
-                        self._append_ai_message(ai_message)
-                        return
-                    except json.JSONDecodeError as e:
-                        print(f"DEBUG: JSON parse error: {e}")
+                        # If this parses as JSON, use it
+                        json.loads(block.strip())
+                        cleaned_response = block.strip()
+                        print(f"DEBUG: Found JSON in general code block: {cleaned_response[:100]}...")
+                        break
+                    except:
                         continue
         
-        # If we get here, no JSON was found or parsed successfully
-        print("DEBUG: No valid JSON found in response, displaying raw response")
-        self._append_ai_message(response)
+        # Try to parse the cleaned response as JSON
+        try:
+            response_json = json.loads(cleaned_response)
+            print(f"DEBUG: Successfully parsed JSON: {response_json}")
+            
+            # Process JSON actions and get user-facing message
+            if "ai_response" in response_json:
+                # Extract the user-facing message
+                user_message = response_json["ai_response"]
+                
+                # Process any actions in the background
+                self._process_json_actions(response_json)
+                
+                # Show only the user-facing message
+                self._append_ai_message(user_message)
+                return
+            
+            # Handle special case for reminder data requests
+            if "action" in response_json and response_json["action"] == "request_data" and response_json.get("data_type") == "reminders":
+                self._handle_reminder_data_request(response_json)
+                return
+        except json.JSONDecodeError:
+            print(f"DEBUG: Failed to parse as JSON: {cleaned_response[:100]}...")
+            # If it's not valid JSON, just display the original response
+            self._append_ai_message(response)
+    
+    def _handle_reminder_data_request(self, request_json: dict) -> None:
+        """
+        Process a request for reminder data from the AI.
+        
+        Args:
+            request_json: The parsed JSON request from the AI
+        """
+        print("DEBUG: Processing request for reminder data")
+        # Get all reminders from storage
+        reminders = storage.get_all_reminders()
+        
+        if not reminders:
+            self._append_ai_message("You don't have any reminders to edit.")
+            return
+        
+        # Format reminders for the AI
+        formatted_reminders = []
+        for reminder_id, message, remind_at, is_done in reminders:
+            if is_done == 0:  # Only include pending reminders
+                try:
+                    dt = datetime.datetime.fromisoformat(remind_at)
+                    formatted_time = dt.strftime("%b %d, %Y, %I:%M %p")
+                except:
+                    formatted_time = remind_at
+                
+                formatted_reminders.append({
+                    "id": reminder_id,
+                    "message": message,
+                    "time": formatted_time,
+                    "original_time": remind_at
+                })
+        
+        if not formatted_reminders:
+            self._append_ai_message("You don't have any pending reminders to edit.")
+            return
+        
+        # Get the original user text
+        original_user_text = self.user_text if hasattr(self, 'user_text') else ""
+        print(f"DEBUG: Original user request was: {original_user_text}")
+        
+        # Create an AI request with the original user message and the reminders data
+        ai_request = f"{original_user_text}\n\nAVAILABLE_REMINDERS: {json.dumps(formatted_reminders)}"
+        print(f"DEBUG: Sending reminders data to AI: {ai_request[:100]}...")
+        
+        # Process the request with the AI to get the proper edit action
+        try:
+            ai_response = self.ai_client.get_response(ai_request)
+            print(f"DEBUG: AI response with reminders data: {ai_response[:100]}...")
+            
+            # Process the AI's response with the new JSON handling logic
+            self._on_ai_response(ai_response)
+        except Exception as e:
+            print(f"ERROR getting AI decision for reminders: {e}")
+            # Fall back to showing the reminders list
+            reminder_list = "\n".join([f"{i+1}. {r['message']} (at {r['time']})" for i, r in enumerate(formatted_reminders)])
+            self._append_ai_message(f"Here are your pending reminders. Please specify which one you'd like to edit:\n\n{reminder_list}")
+            
+        return
 
     def _on_ai_worker_timeout(self) -> None:
         """Handle case where AI worker hasn't responded within the maximum wait time."""
@@ -912,5 +873,106 @@ class OverlayWindow(QDialog):
             print(traceback.format_exc())
             self._append_ai_message(f"Sorry, there was an error during the extended search: {str(e)}")
             self.pending_search_command = None
+
+    def _process_json_actions(self, response_json: dict) -> None:
+        """
+        Process any actions in the JSON response in the background.
+        This allows us to handle reminder creation, editing, etc. without
+        showing the raw JSON to the user.
+        
+        Args:
+            response_json: The parsed JSON response from the AI
+        """
+        try:
+            # Process reminder-specific actions
+            if "action" in response_json:
+                action = response_json["action"]
+                
+                # Handle reminder creation
+                if action == "create" and response_json.get("is_reminder") == True and "reminder" in response_json:
+                    reminder = response_json["reminder"]
+                    message = reminder.get("message", "")
+                    remind_at_str = reminder.get("remind_at", "")
+                    
+                    try:
+                        # Parse the ISO datetime string
+                        remind_at = dateutil.parser.parse(remind_at_str)
+                        # Schedule the reminder
+                        reminder_id = scheduler.schedule_reminder(message, remind_at)
+                        print(f"DEBUG: Created reminder id={reminder_id}: {message} at {remind_at}")
+                    except Exception as e:
+                        print(f"ERROR creating reminder: {e}")
+                
+                # Handle reminder editing
+                elif action == "edit" and "reminder_id" in response_json:
+                    reminder_id = response_json.get("reminder_id")
+                    new_message = response_json.get("new_message", "")
+                    new_remind_at_str = response_json.get("new_remind_at", "")
+                    
+                    print(f"DEBUG: Processing edit action for reminder_id={reminder_id}")
+                    print(f"DEBUG: Edit details - new_message='{new_message}', new_time='{new_remind_at_str}'")
+                    
+                    try:
+                        # Parse the new time if provided
+                        if new_remind_at_str:
+                            print(f"DEBUG: Attempting to parse datetime: {new_remind_at_str}")
+                            new_remind_at = dateutil.parser.parse(new_remind_at_str)
+                            formatted_time = new_remind_at.strftime("%Y-%m-%d %H:%M:%S")
+                            print(f"DEBUG: Successfully parsed datetime to: {formatted_time}")
+                            
+                            # Check if the reminder exists before updating
+                            all_reminders = storage.get_all_reminders()
+                            print(f"DEBUG: All reminders in DB: {all_reminders}")
+                            reminder = next((r for r in all_reminders if r[0] == reminder_id), None)
+                            if not reminder:
+                                print(f"ERROR: Reminder with ID {reminder_id} not found in database")
+                                return
+                                
+                            print(f"DEBUG: Found existing reminder: {reminder}")
+                            
+                            # Update the reminder in storage and reschedule
+                            print(f"DEBUG: Calling storage.update_reminder({reminder_id}, {new_message}, {formatted_time})")
+                            storage.update_reminder(reminder_id, new_message, formatted_time)
+                            
+                            print(f"DEBUG: Calling scheduler.reschedule_reminder({reminder_id}, {new_message}, {new_remind_at})")
+                            scheduler.reschedule_reminder(reminder_id, new_message, new_remind_at)
+                            
+                            print(f"DEBUG: Successfully updated reminder id={reminder_id}")
+                        else:
+                            # If no new time, just update the message
+                            all_reminders = storage.get_all_reminders()
+                            reminder = next((r for r in all_reminders if r[0] == reminder_id), None)
+                            if reminder:
+                                storage.update_reminder(reminder_id, new_message, reminder[2])
+                                print(f"DEBUG: Updated reminder id={reminder_id} message only")
+                            else:
+                                print(f"ERROR: Reminder with ID {reminder_id} not found in database")
+                    except ValueError as ve:
+                        print(f"ERROR parsing datetime: {ve}")
+                    except Exception as e:
+                        print(f"ERROR updating reminder: {str(e)}")
+                        import traceback
+                        print(traceback.format_exc())
+                
+                # Handle reminder deletion
+                elif action == "delete" and "reminder_id" in response_json:
+                    reminder_id = response_json.get("reminder_id")
+                    try:
+                        storage.mark_reminder_done(reminder_id)
+                        scheduler.cancel_reminder(reminder_id)
+                        print(f"DEBUG: Deleted reminder id={reminder_id}")
+                    except Exception as e:
+                        print(f"ERROR deleting reminder: {e}")
+                
+            # Process file search actions if present
+            if "file_search" in response_json:
+                file_search_cmd = response_json["file_search"]
+                if isinstance(file_search_cmd, dict) and "action" in file_search_cmd:
+                    print(f"DEBUG: Processing background file search command: {file_search_cmd}")
+                    # This will be processed in the main method
+        except Exception as e:
+            print(f"ERROR in _process_json_actions: {e}")
+            import traceback
+            print(traceback.format_exc())
 
     # TODO: Add methods for integrating with the AI client and updating chat

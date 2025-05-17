@@ -237,16 +237,49 @@ When the user wants to continue a search, include a "continue_search" field in y
         try:
             print(f"DEBUG: Getting AI response for: {user_message}")
             
+            # Check for reminder data in the message
+            if "Here are the reminders:" in user_message:
+                print("DEBUG: [AIClient] Detected reminder data in request")
+                # Extract the JSON data to log it clearly
+                try:
+                    import json
+                    import re
+                    reminder_json_match = re.search(r'\{.*\}', user_message, re.DOTALL)
+                    if reminder_json_match:
+                        reminder_json = reminder_json_match.group(0)
+                        parsed_json = json.loads(reminder_json)
+                        print(f"DEBUG: [AIClient] Extracted reminder data: {json.dumps(parsed_json, indent=2)}")
+                except Exception as e:
+                    print(f"DEBUG: [AIClient] Error parsing reminder data: {e}")
+            
             # If this is a simple demo, return a mock response
             if os.environ.get("MOCK_AI", "false").lower() == "true":
-                return self._get_mock_response(user_message)
+                print("DEBUG: [AIClient] Using mock AI mode")
+                mock_response = self._get_mock_response(user_message)
+                print(f"DEBUG: [AIClient] Mock response: {mock_response}")
+                return mock_response
             
             # Otherwise call the API
             start_time = time.time()
             response = self._call_api(user_message)
             elapsed_time = time.time() - start_time
             
-            print(f"DEBUG: AI response received in {elapsed_time:.2f}s: {response[:100]}...")
+            # Log the full response for debugging purposes
+            print(f"DEBUG: AI response received in {elapsed_time:.2f}s")
+            
+            # Check if response is JSON and log relevant parts for debugging
+            try:
+                import json
+                parsed = json.loads(response)
+                if "action" in parsed:
+                    print(f"DEBUG: [AIClient] Response action: {parsed['action']}")
+                    if parsed["action"] == "edit" and "reminder_id" in parsed:
+                        print(f"DEBUG: [AIClient] Edit action detected for reminder_id={parsed['reminder_id']}")
+                        print(f"DEBUG: [AIClient] Full edit details: {json.dumps(parsed, indent=2)}")
+            except:
+                # Not JSON or error parsing
+                pass
+                
             return response
             
         except Exception as e:
