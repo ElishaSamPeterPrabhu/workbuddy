@@ -10,7 +10,7 @@ from typing import Any, Callable, Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.jobstores.base import JobLookupError
 from core import storage
-from notifications import show_notification
+from core.notifications import show_notification
 import logging
 from integrations.github import GitHubIntegration
 

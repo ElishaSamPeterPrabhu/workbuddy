@@ -8,6 +8,7 @@ import sys
 from PyQt6.QtWidgets import QApplication
 from ui.overlay import OverlayWindow
 from ui.tray import WorkBuddyTray
+from core.hotkeys import hotkey_manager
 import logging
 import os
 import getpass
@@ -42,6 +43,10 @@ def main() -> None:
     overlay = OverlayWindow()
     tray = WorkBuddyTray(overlay)
     tray.show()
+
+    # Register the global hotkey for showing/hiding the overlay
+    hotkey_manager.register_show_hide(overlay.toggle_visibility)
+    logging.info("Global hotkey registered: Alt+Shift+W to show/hide WorkBuddy")
 
     sys.exit(app.exec())
 

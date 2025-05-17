@@ -38,6 +38,7 @@ import difflib
 import logging
 from integrations.github import GitHubIntegration
 import fnmatch
+import time
 
 
 class WorkflowState:
@@ -170,6 +171,15 @@ When the user wants to continue a search, include a "continue_search" field in y
         # GitHub integration setup
         self.github_integration = GitHubIntegration()
 
+        # New attributes for timeout and retries
+        self.request_timeout = 15  # Reduced from 30 to 15 seconds for faster feedback
+        self.max_retries = 2
+
+        # User context for more helpful responses
+        self.username = os.environ.get("USERNAME", "user")
+        self.last_search_context_str = ""
+        self.logger = logging.getLogger(__name__)
+
     def get_current_iso_time(self) -> str:
         """Return the current time in ISO 8601 format with timezone."""
         return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -225,318 +235,129 @@ When the user wants to continue a search, include a "continue_search" field in y
             The AI's response string.
         """
         try:
-            # Prevent recursion - don't process messages that come from internal context operations
-            if user_message.startswith("Here is the requested data") or "Context about previous file search" in user_message:
-                print("DEBUG: Skipping internal context message to prevent recursion")
-                # Just send the raw message to the API without additional context
-                raw_answer = self.call_ai_model_direct(user_message)
-                return raw_answer or self.get_fallback_response(user_message)
+            print(f"DEBUG: Getting AI response for: {user_message}")
             
-            # Handle special commands first
-            if "|debug:" in user_message.lower():
-                # Debug command for development/testing
-                debug_cmd = user_message.split("|debug:")[1].strip()
-                return f"[DEBUG] Command received: {debug_cmd}"
-
-            # Check for system commands
-            system_response = self.handle_system_command(user_message)
-            if system_response:
-                return system_response
-
-            # Add timestamp to the prompt
-            current_time = self.get_current_iso_time()
+            # If this is a simple demo, return a mock response
+            if os.environ.get("MOCK_AI", "false").lower() == "true":
+                return self._get_mock_response(user_message)
             
-            # Add context about the last files found if this looks like a followup question
-            context_instruction = ""
-            if hasattr(self, 'last_search_context_str') and any(keyword in user_message.lower() for keyword in 
-                      ["where", "which directory", "full path", "location", "where is", "what directory"]):
-                context_instruction = f"\nContext about previous file search: {self.last_search_context_str}\n"
-
-            # Format the prompt with system instructions and user message
-            prompt = getattr(self, "system_prompt", "") + f"\nCurrent time: {current_time}{context_instruction}\n\nUser: {user_message}\nAssistant: "
-
-            # Call the AI model
-            raw_answer = self.call_ai_model_direct(prompt)
+            # Otherwise call the API
+            start_time = time.time()
+            response = self._call_api(user_message)
+            elapsed_time = time.time() - start_time
             
-            # If the raw_answer is None, return a fallback response
-            if not raw_answer:
-                return self.get_fallback_response(user_message)
-
-            # Try to extract JSON from the response
-            if isinstance(raw_answer, str):
-                # Check if the response contains a JSON block
-                json_match = re.search(r"```json\s*(.*?)\s*```", raw_answer, re.DOTALL)
-                if json_match:
-                    # Extract the JSON string
-                    json_str = json_match.group(1).strip()
-                    try:
-                        # Parse the JSON
-                        response_json = json.loads(json_str)
-                        # Handle file search action
-                        if "file_search" in response_json:
-                            # We're returning the full JSON for the UI to handle file search
-                            # When the AI returns "Unknown data_type", it means the UI should handle
-                            # the file search results with natural language
-                            json_str = json.dumps(response_json)  # Ensure clean JSON
-                            # Make sure the ai_response includes a natural language fallback
-                            if response_json.get("ai_response") == "Unknown data_type requested: file_search_results":
-                                response_json["ai_response"] = "I've located some files that may be what you're looking for."
-                                json_str = json.dumps(response_json)
-                            return json_str
-                        # Handle convo action
-                        elif response_json.get("action") == "convo":
-                            # IMPORTANT: If it has file_search field, return the entire JSON instead of just the ai_response
-                            if "file_search" in response_json:
-                                print(f"DEBUG: Found file_search in response_json: {response_json['file_search']}")
-                                # Return the full JSON string for processing by the UI
-                                if not response_json.get("ai_response"):
-                                    response_json["ai_response"] = "Let me search for that file for you."
-                                return json.dumps(response_json)
-                            return response_json.get("ai_response", raw_answer)
-                        # Handle request_data action
-                        elif response_json.get("action") == "request_data":
-                            data_type = response_json.get("data_type")
-                            data = None
-                            if data_type == "reminders":
-                                data = storage.get_all_reminders_with_status()
-                            elif data_type == "notes":
-                                data = storage.get_notes()
-                            elif data_type == "notifications":
-                                data = storage.get_notifications()
-                            else:
-                                return f"Unknown data_type requested: {data_type}"
-                            # Compose a new prompt for the AI with the data
-                            new_prompt = (
-                                f"Here is the requested data as JSON. Use this data to answer the user's previous request.\n"
-                                f'```json\n{{"data_type": "{data_type}", "data": {json.dumps(data, default=str)} }}\n```'
-                            )
-                            # Call get_response so the full action logic is processed
-                            return self.get_response(new_prompt)
-                        # Handle view action
-                        elif response_json.get("action") == "view":
-                            reminders = storage.get_all_reminders_with_status()
-                            if reminders:
-                                reminders_list = []
-                                for i, r in enumerate(reminders):
-                                    # Format time nicely
-                                    try:
-                                        dt = datetime.datetime.fromisoformat(
-                                            r["remind_at"]
-                                        )
-                                        time_str = dt.strftime("%b %d, %Y, %I:%M %p")
-                                    except Exception:
-                                        time_str = r["remind_at"]
-                                    reminders_list.append(
-                                        f"{i+1}. {r['message']}\n    Time: {time_str}\n    Status: {r['status']}"
-                                    )
-                                ai_message = (
-                                    "Here are your reminders:\n\n"
-                                    + "\n\n".join(reminders_list)
-                                )
-                            else:
-                                ai_message = "You have no reminders."
-                            return ai_message
-                        # Handle edit action
-                        elif response_json.get("action") == "edit":
-                            reminder_id = response_json.get("reminder_id")
-                            new_message = response_json.get("new_message")
-                            new_remind_at = response_json.get("new_remind_at")
-                            old_message = response_json.get("old_message") or None
-
-                            print(
-                                f"DEBUG: edit action received: reminder_id={reminder_id}, new_message={new_message}, new_remind_at={new_remind_at}"
-                            )
-
-                            if not reminder_id:
-                                # Always trigger request_data for edit if no id
-                                all_reminders = storage.get_all_reminders_with_status()
-                                return (
-                                    "To proceed with editing, here is all reminder data. Please reply with an 'edit' action and the correct reminder_id.\n"
-                                    f'```json\n{{"action": "request_data", "data_type": "reminders", "data": {json.dumps(all_reminders, default=str)} }}\n```'
-                                )
-                            # Ensure types are correct
-                            try:
-                                reminder_id = int(reminder_id)
-                            except Exception as e:
-                                print(
-                                    f"ERROR: Invalid reminder_id: {reminder_id} ({e})"
-                                )
-                                return "Could not edit reminder: invalid reminder ID."
-
-                            if reminder_id and new_message and new_remind_at:
-                                try:
-                                    print(
-                                        f"[AI Edit] Attempting to update reminder: id={reminder_id}, new_message={new_message}, new_remind_at={new_remind_at}"
-                                    )
-                                    storage.update_reminder(
-                                        reminder_id, new_message, new_remind_at
-                                    )
-                                    print(
-                                        f"[AI Edit] Updated reminder in DB: id={reminder_id}"
-                                    )
-                                    # Fetch the updated reminder from the DB to ensure correct values
-                                    updated = next(
-                                        (
-                                            r
-                                            for r in storage.get_all_reminders()
-                                            if r[0] == reminder_id
-                                        ),
-                                        None,
-                                    )
-                                    print(
-                                        f"[AI Edit] Fetched from DB after update: {updated}"
-                                    )
-                                    if updated:
-                                        updated_message = updated[1]
-                                        updated_remind_at = updated[2]
-                                        try:
-                                            updated_remind_at_dt = (
-                                                dateutil.parser.parse(updated_remind_at)
-                                            )
-                                            print(
-                                                f"[AI Edit] Rescheduling with: id={reminder_id}, message={updated_message}, remind_at={updated_remind_at}"
-                                            )
-                                            scheduler.reschedule_reminder(
-                                                reminder_id,
-                                                updated_message,
-                                                updated_remind_at_dt,
-                                            )
-                                        except Exception as sched_err:
-                                            print(
-                                                f"[Scheduler] Failed to reschedule reminder id={reminder_id}: {sched_err}"
-                                            )
-                                    else:
-                                        print(
-                                            f"[AI Edit] Reminder id={reminder_id} not found in DB after update."
-                                        )
-                                    print(
-                                        f"DEBUG: update_reminder called with id={reminder_id}, message={new_message}, remind_at={new_remind_at}"
-                                    )
-                                except Exception as e:
-                                    print(f"ERROR: update_reminder failed: {e}")
-                                    print(f"[AI Edit] Exception during update: {e}")
-                                    return "Could not edit reminder: database error."
-                            else:
-                                print("ERROR: Missing required fields for edit.")
-                                return "Could not edit reminder: missing required information."
-                        # Only create a new reminder if no action is present
-                        elif (
-                            isinstance(response_json, dict)
-                            and response_json.get("is_reminder") is True
-                            and response_json.get("reminder")
-                        ):
-                            reminder = response_json["reminder"]
-                            message = reminder.get("message")
-                            remind_at = reminder.get("remind_at")
-                            if message and remind_at:
-                                # Parse ISO datetime string to datetime object
-                                remind_at_dt = dateutil.parser.isoparse(remind_at)
-                                scheduler.schedule_reminder(message, remind_at_dt)
-                        # Handle GitHub actions
-                        elif response_json.get("action") == "github_notifications":
-                            notifications = self.github_integration.get_notifications()
-                            if isinstance(notifications, list):
-                                if not notifications:
-                                    return "You have no new GitHub notifications."
-                                return "Your GitHub notifications:\n" + "\n".join(
-                                    f"- [{n['repository']}] {n['subject']} ({n['type']})"
-                                    for n in notifications
-                                )
-                            return notifications.get(
-                                "error", "Error fetching notifications."
-                            )
-                        elif response_json.get("action") == "github_prs":
-                            prs = self.github_integration.get_pull_requests()
-                            if isinstance(prs, list):
-                                if not prs:
-                                    return "You have no open GitHub pull requests."
-                                return "Your open GitHub PRs:\n" + "\n".join(
-                                    f"- [{pr['repo']}] {pr['title']} (#{pr['number']})"
-                                    for pr in prs
-                                )
-                            return prs.get("error", "Error fetching pull requests.")
-                        elif response_json.get("action") == "github_repos":
-                            repos = self.github_integration.get_repos()
-                            if isinstance(repos, list):
-                                if not repos:
-                                    return "You have no repositories."
-                                # Always show full_name
-                                return "Your repositories:\n" + "\n".join(
-                                    f"- {repo['full_name']}: {repo['description'] or 'No description'}"
-                                    for repo in repos
-                                )
-                            return repos.get("error", "Error fetching repositories.")
-                        elif response_json.get("action") == "github_activity":
-                            activity = self.github_integration.get_recent_activity()
-                            if isinstance(activity, list):
-                                if not activity:
-                                    return "No recent GitHub activity."
-                                return "Your recent GitHub activity:\n" + "\n".join(
-                                    f"- [{a['repo']}] {a['type']} by {a['actor']} at {a['created_at']}"
-                                    for a in activity
-                                )
-                            return activity.get("error", "Error fetching activity.")
-                        elif response_json.get("action") == "github_prs_for_repo":
-                            repo_name = response_json.get("repo")
-                            user_filter = response_json.get("user")
-                            if not repo_name:
-                                return "No repository specified. Please provide the full repository name (owner/repo)."
-                            # Defensive: If not full_name, try to resolve
-                            if "/" not in repo_name:
-                                repos = self.github_integration.get_repos()
-                                matches = [
-                                    r
-                                    for r in repos
-                                    if r["name"].lower() == repo_name.lower()
-                                ]
-                                if len(matches) == 1:
-                                    repo_name = matches[0]["full_name"]
-                                elif len(matches) > 1:
-                                    return (
-                                        f"Multiple repositories match '{repo_name}':\n"
-                                        + "\n".join(
-                                            f"- {r['full_name']}" for r in matches
-                                        )
-                                        + "\nPlease specify the full repository name (owner/repo)."
-                                    )
-                                else:
-                                    return f"No repository found matching '{repo_name}'. Please specify the full repository name (owner/repo)."
-                            prs = self.github_integration.get_pull_requests_for_repo(
-                                repo_name, user=user_filter
-                            )
-                            if isinstance(prs, list):
-                                if not prs:
-                                    if user_filter:
-                                        return f"You have no open pull requests in {repo_name} for user {user_filter}."
-                                    return f"You have no open pull requests in {repo_name}."
-                                if user_filter:
-                                    return (
-                                        f"Open PRs for {repo_name} (user: {user_filter}):\n"
-                                        + "\n".join(
-                                            f"- {pr['title']} (#{pr['number']})"
-                                            for pr in prs
-                                        )
-                                    )
-                                return f"Open PRs for {repo_name}:\n" + "\n".join(
-                                    f"- {pr['title']} (#{pr['number']})" for pr in prs
-                                )
-                            return prs.get(
-                                "error",
-                                f"Error fetching pull requests for {repo_name}.",
-                            )
-                        return response_json.get("ai_response", raw_answer)
-                    except Exception as e:
-                        print("JSON parsing error:", e)
-                        return raw_answer
-                else:
-                    # If no JSON block, just return the answer as before
-                    return raw_answer
-            else:
-                return self.get_fallback_response(user_message)
-
+            print(f"DEBUG: AI response received in {elapsed_time:.2f}s: {response[:100]}...")
+            return response
+            
         except Exception as e:
-            print(f"Exception in AI client: {str(e)}")
-            return self.get_fallback_response(user_message)
+            import traceback
+            self.logger.error(f"Error getting AI response: {e}")
+            self.logger.error(traceback.format_exc())
+            return f"Sorry, I encountered an error: {str(e)}"
+
+    def _call_api(self, user_message: str, retry_count: int = 0) -> str:
+        """
+        Call the AI API with the user message.
+        
+        Args:
+            user_message: User's message text
+            retry_count: Current retry attempt (for internal use)
+            
+        Returns:
+            AI's response text
+        """
+        try:
+            # Check if we have the necessary API key
+            if not self.access_token:
+                return json.dumps({
+                    "ai_response": "Error: API key not configured. Please set the TRIMBLE_API_TOKEN environment variable."
+                })
+            
+            # Build context with search results if available
+            context = ""
+            if hasattr(self, 'last_search_context_str') and self.last_search_context_str:
+                context = f"Context from previous searches: {self.last_search_context_str}\n\n"
+            
+            # Use the correct Trimble API format
+            current_time = self.get_current_iso_time()
+            message = f"{context}{user_message}\n\ncurrent_time: {current_time}"
+            
+            payload = {
+                "message": message,
+                "session_id": self.session_id,
+                "interlocutor_id": self.interlocutor_id,
+                "stream": False,
+                "model_id": self.model_name
+            }
+            
+            # Make the API call with timeout
+            response = requests.post(
+                self.base_url, 
+                headers=self.headers, 
+                json=payload,
+                timeout=self.request_timeout
+            )
+            
+            # Check for successful response
+            if response.status_code == 200:
+                response_data = response.json()
+                if "message" in response_data:
+                    return response_data["message"]
+                else:
+                    return json.dumps({
+                        "ai_response": "Received response from AI service but couldn't find expected content."
+                    })
+            else:
+                # Handle API errors
+                error_msg = f"API error: {response.status_code} - {response.text}"
+                self.logger.error(error_msg)
+                
+                # Fall back to mock response if API fails
+                return self._get_mock_response(user_message)
+                
+        except requests.Timeout:
+            error_msg = f"Request timed out after {self.request_timeout} seconds"
+            self.logger.error(error_msg)
+            return json.dumps({
+                "ai_response": f"The AI service is taking too long to respond. Please try again or simplify your question."
+            })
+            
+        except requests.RequestException as e:
+            self.logger.error(f"Request exception: {e}")
+            return self._get_mock_response(user_message)
+            
+        except Exception as e:
+            self.logger.error(f"Unexpected error in API call: {e}")
+            return self._get_mock_response(user_message)
+
+    def _get_mock_response(self, user_message: str) -> str:
+        """
+        Generate a mock response for testing without calling an actual API.
+        
+        Args:
+            user_message: User's message text
+            
+        Returns:
+            Mocked AI response
+        """
+        # Simulate a brief delay
+        time.sleep(0.5)
+        
+        # Simple command detection for file search demos
+        if "find" in user_message.lower() or "search" in user_message.lower() or "file" in user_message.lower():
+            return json.dumps({
+                "ai_response": "I'll search for that file for you.",
+                "file_search": {
+                    "action": "search_files_recursive",
+                    "pattern": "*" + user_message.split()[-1] + "*",
+                    "directory": os.path.expanduser("~\\Documents")
+                }
+            })
+        
+        # Default response
+        return json.dumps({
+            "ai_response": f"This is a mock response to: {user_message}"
+        })
 
     def get_fallback_response(self, user_message: str) -> str:
         """

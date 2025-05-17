@@ -5,6 +5,8 @@
 PyQt6>=6.5.0
 PyQt6-QScintilla>=2.14.0
 PyQt6-Qt6>=6.5.0
+keyboard>=0.13.5  # For global keyboard shortcuts
+python-dotenv>=1.0.0
 
 # System tray and notifications
 pystray>=0.19.4
