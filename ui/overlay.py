@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QDateTimeEdit,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QCoreApplication, QTimer
 from PyQt6.QtGui import QColor, QPalette, QTextCursor
 from core.ai_client import AIClient
 from core import storage
@@ -43,28 +43,101 @@ class AIWorker(QThread):
     """
 
     result_ready = pyqtSignal(str)
+    error_occurred = pyqtSignal(str)
 
     def __init__(self, ai_client: AIClient, user_text: str) -> None:
         super().__init__()
         self.ai_client = ai_client
         self.user_text = user_text
+        self.timeout = 10  # Reduced from 15 to 10 seconds max wait for AI response
+        self.should_cancel = False
 
     def run(self) -> None:
         print(f"DEBUG: AIWorker.run() - getting response for: {self.user_text}")
-        response = self.ai_client.get_response(self.user_text)
-        print(f"DEBUG: AIWorker.run() - raw response from ai_client: {response}")
-        
-        # Try to see if the response is already JSON
         try:
-            # Try parsing response as JSON
-            json_obj = json.loads(response)
-            print(f"DEBUG: AIWorker.run() - parsed response as JSON: {json_obj}")
-            # If it parses as JSON, wrap it in ```json ``` to signal it's JSON
-            self.result_ready.emit(f"```json\n{response}\n```")
-        except json.JSONDecodeError:
-            # Not JSON, pass through as is
-            print("DEBUG: AIWorker.run() - response is not JSON, passing through as is")
-            self.result_ready.emit(response)
+            # Use QTimer to implement a timeout mechanism
+            from PyQt6.QtCore import QTimer, QEventLoop
+            
+            # Create local event loop
+            loop = QEventLoop()
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(loop.quit)
+            
+            # Set up result variables
+            response = None
+            timed_out = False
+            
+            # Define the worker function that will run in this thread
+            def get_ai_response():
+                nonlocal response
+                try:
+                    if not self.should_cancel:
+                        response = self.ai_client.get_response(self.user_text)
+                except Exception as e:
+                    print(f"ERROR in AIWorker: {str(e)}")
+                    import traceback
+                    print(traceback.format_exc())
+                    response = json.dumps({
+                        "ai_response": f"Sorry, I encountered an error: {str(e)}"
+                    })
+                finally:
+                    if not self.should_cancel:
+                        loop.quit()
+            
+            # Start the timer
+            timer.start(self.timeout * 1000)  # Convert to milliseconds
+            
+            # Start the worker function in this thread
+            QTimer.singleShot(0, get_ai_response)
+            
+            # Wait until either the timer times out or the function completes
+            loop.exec()
+            
+            # Return immediately if cancelled
+            if self.should_cancel:
+                print("DEBUG: AIWorker cancelled, exiting immediately")
+                return
+                
+            # Check if we timed out
+            if timer.isActive():
+                # Worker completed before timeout
+                timer.stop()
+            else:
+                # We timed out
+                timed_out = True
+                print(f"DEBUG: AIWorker timed out after {self.timeout} seconds")
+                response = json.dumps({
+                    "ai_response": "I'm taking longer than expected to respond. Please try again with a simpler request."
+                })
+            
+            # Process the response
+            try:
+                if response:
+                    # Try parsing response as JSON
+                    json_obj = json.loads(response)
+                    print(f"DEBUG: AIWorker.run() - parsed response as JSON: {json_obj}")
+                    # If it parses as JSON, wrap it in ```json ``` to signal it's JSON
+                    self.result_ready.emit(f"```json\n{response}\n```")
+                else:
+                    # No response (should not happen with timeout mechanism)
+                    self.result_ready.emit(json.dumps({
+                        "ai_response": "Sorry, I wasn't able to generate a response."
+                    }))
+            except json.JSONDecodeError:
+                # Not JSON, pass through as is
+                print("DEBUG: AIWorker.run() - response is not JSON, passing through as is")
+                self.result_ready.emit(response)
+                
+        except Exception as e:
+            print(f"CRITICAL ERROR in AIWorker thread: {e}")
+            import traceback
+            print(traceback.format_exc())
+            self.error_occurred.emit(f"Sorry, I encountered an unexpected error: {str(e)}")
+            
+    def cancel(self):
+        """Cancel the worker thread operation."""
+        self.should_cancel = True
 
 
 class RemindersDialog(QDialog):
@@ -243,105 +316,129 @@ class OverlayWindow(QDialog):
         self.last_search_results = []
         self.pending_search_command = None
         self.waiting_for_search_confirmation = False
+        # Track the reminders dialog
+        self.reminder_dialog: Optional[RemindersDialog] = None
         self._init_ui()
 
     def _init_ui(self) -> None:
         """
         Set up the UI layout and widgets for the overlay.
         """
-        # Full-screen, semi-transparent dimmed background
-        self.setGeometry(
-            0, 0, self.screen().geometry().width(), self.screen().geometry().height()
-        )
+        try:
+            # Full-screen, semi-transparent dimmed background
+            self.setGeometry(
+                0, 0, self.screen().geometry().width(), self.screen().geometry().height()
+            )
 
-        # Main layout (transparent)
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
+            # Main layout (transparent)
+            main_layout = QVBoxLayout(self)
+            main_layout.setContentsMargins(0, 0, 0, 0)
+            main_layout.setSpacing(0)
 
-        # Spacer to push chat popup to bottom
-        main_layout.addStretch(1)
+            # Spacer to push chat popup to bottom
+            main_layout.addStretch(1)
 
-        # Chat popup frame
-        self.chat_frame = QFrame(self)
-        self.chat_frame.setObjectName("chatFrame")
-        self.chat_frame.setFixedWidth(600)
-        # Add glowing effect
-        glow = QGraphicsDropShadowEffect(self.chat_frame)
-        glow.setBlurRadius(48)
-        glow.setColor(QColor(138, 180, 248, 180))  # Soft blue glow
-        glow.setOffset(0, 0)
-        self.chat_frame.setGraphicsEffect(glow)
-        # Enhanced border radius
-        self.chat_frame.setStyleSheet(
-            """
-            QFrame#chatFrame {
-                background: rgba(20, 30, 50, 0.98);
-                border-radius: 32px;
-                border: 2px solid #2a3959;
-            }
-            """
-        )
+            # Chat popup frame
+            self.chat_frame = QFrame(self)
+            self.chat_frame.setObjectName("chatFrame")
+            self.chat_frame.setFixedWidth(600)
+            # Add glowing effect
+            glow = QGraphicsDropShadowEffect(self.chat_frame)
+            glow.setBlurRadius(48)
+            glow.setColor(QColor(138, 180, 248, 180))  # Soft blue glow
+            glow.setOffset(0, 0)
+            self.chat_frame.setGraphicsEffect(glow)
+            # Enhanced border radius
+            self.chat_frame.setStyleSheet(
+                """
+                QFrame#chatFrame {
+                    background: rgba(20, 30, 50, 0.98);
+                    border-radius: 32px;
+                    border: 2px solid #2a3959;
+                }
+                """
+            )
 
-        chat_layout = QVBoxLayout(self.chat_frame)
-        chat_layout.setContentsMargins(24, 18, 24, 18)
-        chat_layout.setSpacing(12)
+            chat_layout = QVBoxLayout(self.chat_frame)
+            chat_layout.setContentsMargins(24, 18, 24, 18)
+            chat_layout.setSpacing(12)
 
-        # Response display (read-only)
-        self.response_display = QTextEdit(self.chat_frame)
-        self.response_display.setReadOnly(True)
-        self.response_display.setFixedHeight(90)
-        self.response_display.setStyleSheet(
-            "background: #18243a; color: #e3eafc; border: none; font-size: 13px; border-radius: 8px;"
-        )
-        self.response_display.setText(
-            "Hi! How's it going? What can I assist you with today?"
-        )
-        chat_layout.addWidget(self.response_display)
+            # Response display (read-only)
+            self.response_display = QTextEdit(self.chat_frame)
+            self.response_display.setReadOnly(True)
+            self.response_display.setFixedHeight(90)
+            self.response_display.setStyleSheet(
+                "background: #18243a; color: #e3eafc; border: none; font-size: 13px; border-radius: 8px;"
+            )
+            self.response_display.setText(
+                "Hi! How's it going? What can I assist you with today?"
+            )
+            chat_layout.addWidget(self.response_display)
 
-        # Input row
-        input_row = QHBoxLayout()
-        input_row.setSpacing(8)
+            # Input row
+            input_row = QHBoxLayout()
+            input_row.setSpacing(8)
 
-        self.input_box = QLineEdit(self.chat_frame)
-        self.input_box.setPlaceholderText("Type something...")
-        self.input_box.setStyleSheet(
-            "background: #22304a; color: #e3eafc; border: none; font-size: 14px; border-radius: 8px; padding: 8px;"
-        )
-        self.input_box.returnPressed.connect(self._on_send_clicked)
-        input_row.addWidget(self.input_box, 1)
+            self.input_box = QLineEdit(self.chat_frame)
+            self.input_box.setPlaceholderText("Type something...")
+            self.input_box.setStyleSheet(
+                "background: #22304a; color: #e3eafc; border: none; font-size: 14px; border-radius: 8px; padding: 8px;"
+            )
+            self.input_box.returnPressed.connect(self._on_send_clicked)
+            input_row.addWidget(self.input_box, 1)
 
-        self.send_button = QPushButton("➤", self.chat_frame)
-        self.send_button.setStyleSheet(
-            "background: #2a3959; color: #8ab4f8; border: none; font-size: 18px; border-radius: 8px; padding: 8px 16px;"
-        )
-        self.send_button.clicked.connect(self._on_send_clicked)
-        input_row.addWidget(self.send_button)
+            self.send_button = QPushButton("➤", self.chat_frame)
+            self.send_button.setStyleSheet(
+                "background: #2a3959; color: #8ab4f8; border: none; font-size: 18px; border-radius: 8px; padding: 8px 16px;"
+            )
+            self.send_button.clicked.connect(self._on_send_clicked)
+            input_row.addWidget(self.send_button)
 
-        # Add Reminders icon button (⏰) to the right of the input box
-        self.reminders_icon_button = QPushButton("⏰", self.chat_frame)
-        self.reminders_icon_button.setToolTip("Show all reminders")
-        self.reminders_icon_button.setFixedSize(36, 36)
-        self.reminders_icon_button.setStyleSheet(
-            "background: #22304a; color: #8ab4f8; border: none; font-size: 20px; border-radius: 18px;"
-        )
-        self.reminders_icon_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.reminders_icon_button.setAutoDefault(False)
-        self.reminders_icon_button.clicked.connect(self._show_reminders_dialog)
-        input_row.addWidget(self.reminders_icon_button)
+            # Add Reminders icon button (⏰) to the right of the input box
+            self.reminders_icon_button = QPushButton("⏰", self.chat_frame)
+            self.reminders_icon_button.setToolTip("Show all reminders")
+            self.reminders_icon_button.setFixedSize(36, 36)
+            self.reminders_icon_button.setStyleSheet(
+                "background: #22304a; color: #8ab4f8; border: none; font-size: 20px; border-radius: 18px;"
+            )
+            self.reminders_icon_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.reminders_icon_button.setAutoDefault(False)
+            self.reminders_icon_button.clicked.connect(self._show_reminders_dialog)
+            input_row.addWidget(self.reminders_icon_button)
 
-        chat_layout.addLayout(input_row)
-        self.chat_frame.setLayout(chat_layout)
+            chat_layout.addLayout(input_row)
+            self.chat_frame.setLayout(chat_layout)
 
-        # Center chat popup at bottom
-        chat_popup_layout = QHBoxLayout()
-        chat_popup_layout.addStretch(1)
-        chat_popup_layout.addWidget(self.chat_frame)
-        chat_popup_layout.addStretch(1)
-        main_layout.addLayout(chat_popup_layout)
-        main_layout.addSpacing(40)
+            # Center chat popup at bottom
+            chat_popup_layout = QHBoxLayout()
+            chat_popup_layout.addStretch(1)
+            chat_popup_layout.addWidget(self.chat_frame)
+            chat_popup_layout.addStretch(1)
+            main_layout.addLayout(chat_popup_layout)
+            main_layout.addSpacing(40)
 
-        self.setLayout(main_layout)
+            self.setLayout(main_layout)
+            
+            # Set focus policies to ensure proper tab order
+            self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self.input_box.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+            self.send_button.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+            
+            # Set tab order
+            self.setTabOrder(self.input_box, self.send_button)
+            self.setTabOrder(self.send_button, self.reminders_icon_button)
+            
+            print("DEBUG: UI initialization completed successfully")
+        except Exception as e:
+            import traceback
+            print(f"ERROR in _init_ui: {e}")
+            print(traceback.format_exc())
+            # Create a minimal UI so the application doesn't crash completely
+            minimal_layout = QVBoxLayout(self)
+            error_label = QLabel(f"Error initializing UI: {str(e)}", self)
+            error_label.setStyleSheet("color: white; background: rgba(255,0,0,128); padding: 20px;")
+            minimal_layout.addWidget(error_label)
+            self.setLayout(minimal_layout)
 
     def paintEvent(self, event) -> None:
         """
@@ -359,15 +456,108 @@ class OverlayWindow(QDialog):
         """
         Show the overlay window.
         """
-        self.show()
-        self.activateWindow()
-        self.raise_()
+        try:
+            # First update the window size to match current screen
+            self.setGeometry(0, 0, self.screen().geometry().width(), self.screen().geometry().height())
+            
+            # Ensure we're in the main thread for UI operations
+            from PyQt6.QtCore import QThread
+            if QThread.currentThread() is not QThread.currentThread():
+                print("WARNING: show_overlay called from non-main thread")
+                # Defer to main thread
+                from PyQt6.QtCore import QMetaObject, Qt
+                QMetaObject.invokeMethod(self, "show_overlay", Qt.ConnectionType.QueuedConnection)
+                return
+            
+            # Show the window first
+            self.show()
+            self.activateWindow()
+            self.raise_()
+            
+            # Force application to process events immediately
+            from PyQt6.QtCore import QCoreApplication
+            QCoreApplication.processEvents()
+            
+            # Set focus directly - not using a timer to avoid threading issues
+            self.input_box.setFocus()
+            
+            print("DEBUG: Overlay window shown")
+        except Exception as e:
+            import traceback
+            print(f"ERROR in show_overlay: {e}")
+            print(traceback.format_exc())
 
     def hide_overlay(self) -> None:
         """
         Hide the overlay window.
         """
-        self.hide()
+        try:
+            # Ensure we're in the main thread for UI operations
+            from PyQt6.QtCore import QThread
+            if QThread.currentThread() is not QThread.currentThread():
+                print("WARNING: hide_overlay called from non-main thread")
+                # Defer to main thread
+                from PyQt6.QtCore import QMetaObject, Qt
+                QMetaObject.invokeMethod(self, "hide_overlay", Qt.ConnectionType.QueuedConnection)
+                return
+            
+            # Check if the reminder dialog is open and close it
+            if self.reminder_dialog and self.reminder_dialog.isVisible():
+                print("DEBUG: Closing open reminder dialog")
+                self.reminder_dialog.close()
+                self.reminder_dialog = None
+            
+            # Simply hide the window - don't mess with the worker thread
+            self.hide()
+            
+            # Force application to process events immediately
+            from PyQt6.QtCore import QCoreApplication
+            QCoreApplication.processEvents()
+            
+            print("DEBUG: Overlay window hidden")
+        except Exception as e:
+            import traceback
+            print(f"ERROR in hide_overlay: {e}")
+            print(traceback.format_exc())
+
+    def toggle_visibility(self) -> None:
+        """
+        Toggle the visibility of the overlay window.
+        
+        This method is used as a callback for the global hotkey.
+        """
+        try:
+            print("DEBUG: toggle_visibility called")
+            
+            # Ensure we're in the main thread for UI operations
+            from PyQt6.QtCore import QThread
+            if QThread.currentThread() is not QThread.currentThread():
+                print("WARNING: toggle_visibility called from non-main thread")
+                # Defer to main thread
+                from PyQt6.QtCore import QMetaObject, Qt
+                QMetaObject.invokeMethod(self, "toggle_visibility", Qt.ConnectionType.QueuedConnection)
+                return
+            
+            # Simple visibility toggle with safeguards
+            if self.isVisible():
+                print("DEBUG: Window is visible, hiding")
+                self.hide_overlay()
+            else:
+                print("DEBUG: Window is hidden, showing")
+                self.show_overlay()
+                
+                # This second call to setFocus is crucial - needed for some systems
+                # Force application to process events in between
+                from PyQt6.QtCore import QCoreApplication
+                QCoreApplication.processEvents()
+                self.input_box.setFocus()
+                
+        except Exception as e:
+            import traceback
+            print(f"ERROR in toggle_visibility: {e}")
+            print(traceback.format_exc())
+            # Simplest recovery - just hide
+            self.hide()
 
     def _on_send_clicked(self) -> None:
         print("DEBUG: _on_send_clicked called")
@@ -382,8 +572,25 @@ class OverlayWindow(QDialog):
         self._append_ai_message("<i>Thinking...</i>")
         self.input_box.setDisabled(True)
         self.send_button.setDisabled(True)
+        
+        # Clean up any existing worker thread
+        if hasattr(self, '_ai_worker') and self._ai_worker and self._ai_worker.isRunning():
+            print("DEBUG: Cancelling previous AI worker")
+            self._ai_worker.cancel()
+        
+        # Set up a watchdog timer to re-enable input after a maximum wait time
+        from PyQt6.QtCore import QTimer
+        if hasattr(self, 'input_watchdog') and self.input_watchdog.isActive():
+            self.input_watchdog.stop()
+        self.input_watchdog = QTimer(self)
+        self.input_watchdog.setSingleShot(True)
+        self.input_watchdog.timeout.connect(self._on_ai_worker_timeout)
+        self.input_watchdog.start(15000)  # 15 seconds max wait (reduced from 20)
+        
+        # Start the AI worker
         self._ai_worker = AIWorker(self.ai_client, user_text)
         self._ai_worker.result_ready.connect(self._on_ai_response)
+        self._ai_worker.error_occurred.connect(self._on_ai_worker_error)
         self._ai_worker.finished.connect(self._on_ai_worker_finished)
         self._ai_worker.start()
 
@@ -576,19 +783,68 @@ class OverlayWindow(QDialog):
         print("DEBUG: No valid JSON found in response, displaying raw response")
         self._append_ai_message(response)
 
+    def _on_ai_worker_timeout(self) -> None:
+        """Handle case where AI worker hasn't responded within the maximum wait time."""
+        print("DEBUG: AI worker timeout triggered - forcing UI to re-enable")
+        if self._ai_worker and self._ai_worker.isRunning():
+            # Don't wait for the worker, just re-enable the UI
+            # The thread will eventually finish or be cleaned up later
+            print("WARNING: AI worker still running after timeout")
+        
+        cursor = self.response_display.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+        last_block = cursor.selectedText()
+        if "Thinking..." in last_block:
+            cursor.removeSelectedText()
+            cursor.deletePreviousChar()
+            self.response_display.setTextCursor(cursor)
+            self._append_ai_message("I'm taking longer than expected. The UI has been re-enabled so you can continue working.")
+        
+        # Re-enable input
+        self.input_box.setDisabled(False)
+        self.send_button.setDisabled(False)
+        self.input_box.setFocus()
+
+    def _on_ai_worker_error(self, error_message: str) -> None:
+        """Handle errors reported by the AI worker thread."""
+        print(f"DEBUG: AI worker reported error: {error_message}")
+        cursor = self.response_display.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+        last_block = cursor.selectedText()
+        if "Thinking..." in last_block:
+            cursor.removeSelectedText()
+            cursor.deletePreviousChar()
+            self.response_display.setTextCursor(cursor)
+        
+        self._append_ai_message(error_message)
+        
+        # Re-enable input
+        self.input_box.setDisabled(False)
+        self.send_button.setDisabled(False)
+        self.input_box.setFocus()
+
     def _on_ai_worker_finished(self) -> None:
         """
         Re-enable input after AI response is received.
         """
+        print("DEBUG: AI worker thread finished")
+        # Cancel the watchdog timer
+        if hasattr(self, 'input_watchdog') and self.input_watchdog.isActive():
+            self.input_watchdog.stop()
+        
         self.input_box.setDisabled(False)
         self.send_button.setDisabled(False)
         self.input_box.setFocus()
 
     def _show_reminders_dialog(self) -> None:
         print("DEBUG: _show_reminders_dialog called")
-        dlg = RemindersDialog(self)
-        dlg.refresh_reminders()
-        dlg.exec()
+        self.reminder_dialog = RemindersDialog(self)
+        self.reminder_dialog.refresh_reminders()
+        self.reminder_dialog.exec()
+        # Reset the reference after dialog is closed
+        self.reminder_dialog = None
 
     def _run_extended_search(self) -> None:
         """
