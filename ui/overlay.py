@@ -38,6 +38,9 @@ import os
 import io
 import subprocess
 import sys
+import speech_recognition as sr
+import pyttsx3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Union
@@ -294,6 +297,174 @@ class RemindersDialog(QDialog):
             self.refresh_reminders()
 
 
+class VoiceInputThread(QThread):
+    """
+    Worker thread for capturing voice input without blocking the UI.
+    """
+    voice_text_ready = pyqtSignal(str)
+    error_occurred = pyqtSignal(str)
+    listening_started = pyqtSignal()
+    listening_ended = pyqtSignal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        try:
+            self.recognizer = sr.Recognizer()
+            self.is_listening = False
+            self.should_stop = False
+            self.pyaudio_available = True
+            # Test if PyAudio works by getting a list of available microphones
+            mics = sr.Microphone.list_microphone_names()
+            if not mics:
+                print("WARNING: No microphones found")
+                self.pyaudio_available = False
+        except (ImportError, OSError, AttributeError) as e:
+            print(f"WARNING: PyAudio initialization error: {e}")
+            self.pyaudio_available = False
+            self.is_listening = False
+            self.should_stop = False
+
+    def run(self) -> None:
+        """Run voice recognition in a separate thread."""
+        print("DEBUG: VoiceInputThread.run() - Starting voice input capture")
+        self.should_stop = False
+        
+        if not self.pyaudio_available:
+            self.error_occurred.emit("Could not find PyAudio; check installation")
+            print("ERROR: PyAudio is not available. Voice recognition disabled.")
+            return
+        
+        try:
+            with sr.Microphone() as source:
+                # Calibrate for ambient noise
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                
+                # Signal that we're listening
+                self.listening_started.emit()
+                self.is_listening = True
+                print("DEBUG: Listening for speech...")
+                
+                try:
+                    # Listen for speech with timeout
+                    audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=10)
+                    
+                    # Signal that we've stopped listening
+                    self.is_listening = False
+                    self.listening_ended.emit()
+                    
+                    if self.should_stop:
+                        print("DEBUG: Voice input thread was stopped")
+                        return
+                    
+                    # Process the audio
+                    print("DEBUG: Processing speech...")
+                    text = self.recognizer.recognize_google(audio)
+                    print(f"DEBUG: Speech recognized: '{text}'")
+                    self.voice_text_ready.emit(text)
+                
+                except sr.WaitTimeoutError:
+                    self.is_listening = False
+                    self.listening_ended.emit()
+                    self.error_occurred.emit("I didn't hear anything. Please try again.")
+                
+                except sr.UnknownValueError:
+                    self.is_listening = False
+                    self.listening_ended.emit()
+                    self.error_occurred.emit("I couldn't understand what you said. Please try again.")
+                
+                except Exception as e:
+                    self.is_listening = False
+                    self.listening_ended.emit()
+                    print(f"ERROR in speech recognition: {e}")
+                    self.error_occurred.emit(f"Error processing speech: {str(e)}")
+        
+        except Exception as e:
+            self.is_listening = False
+            self.listening_ended.emit()
+            print(f"ERROR initializing microphone: {e}")
+            self.error_occurred.emit(f"Microphone error: {str(e)}")
+    
+    def stop_listening(self) -> None:
+        """Stop the voice recognition thread."""
+        print("DEBUG: Stopping voice input thread")
+        self.should_stop = True
+        self.is_listening = False
+
+
+class VoiceSynthesizer:
+    """
+    Class for handling text-to-speech functionality.
+    """
+    def __init__(self) -> None:
+        """Initialize the voice synthesizer engine."""
+        self.engine = pyttsx3.init()
+        self.is_speaking = False
+        self.should_stop = False
+        # Set default properties
+        self.engine.setProperty('rate', 180)  # Speed of speech
+        self.engine.setProperty('volume', 0.9)  # Volume (0.0 to 1.0)
+        # Get available voices and select a good one
+        voices = self.engine.getProperty('voices')
+        # Try to find a female voice, otherwise use default
+        for voice in voices:
+            if 'female' in voice.name.lower():
+                self.engine.setProperty('voice', voice.id)
+                break
+
+    def speak(self, text: str) -> None:
+        """
+        Speak the given text asynchronously.
+        
+        Args:
+            text: The text to be spoken
+        """
+        if not text or self.is_speaking:
+            return
+            
+        # Reset stop flag
+        self.should_stop = False
+        
+        def speak_worker():
+            self.is_speaking = True
+            
+            # Clean up text - strip HTML tags and code markers
+            clean_text = re.sub(r'<.*?>', '', text)
+            clean_text = re.sub(r'```.*?```', '', clean_text, flags=re.DOTALL)
+            
+            # Shorten extremely long responses to first paragraph
+            if len(clean_text) > 500:
+                paragraphs = clean_text.split('\n\n')
+                clean_text = paragraphs[0]
+                if len(paragraphs) > 1:
+                    clean_text += ". There's more information available on screen."
+                    
+            print(f"DEBUG: Speaking: '{clean_text[:100]}...'")
+            
+            def on_word(name, location, length):
+                if self.should_stop:
+                    self.engine.stop()
+                    return
+            
+            # Add word callback to allow stopping
+            self.engine.connect('started-word', on_word)
+            
+            # Speak the text
+            self.engine.say(clean_text)
+            self.engine.runAndWait()
+            
+            self.is_speaking = False
+        
+        # Start in a separate thread to not block UI
+        threading.Thread(target=speak_worker).start()
+    
+    def stop_speaking(self) -> None:
+        """Stop the current speech."""
+        if self.is_speaking:
+            print("DEBUG: Stopping speech")
+            self.should_stop = True
+            # Stopping will happen in the word callback
+
+
 class OverlayWindow(QDialog):
     """
     Overlay chat window with dimmed background and floating chat popup.
@@ -326,6 +497,18 @@ class OverlayWindow(QDialog):
         self.reminder_dialog: Optional[RemindersDialog] = None
         # Store suggested repo for confirmation
         self.suggested_repo = None
+        
+        # Voice functionality
+        self.voice_input_thread = VoiceInputThread()
+        self.voice_synthesizer = VoiceSynthesizer()
+        self.voice_output_enabled = True  # Default state for TTS
+        
+        # Connect voice input signals
+        self.voice_input_thread.voice_text_ready.connect(self._on_voice_text_ready)
+        self.voice_input_thread.error_occurred.connect(self._on_voice_input_error)
+        self.voice_input_thread.listening_started.connect(self._on_listening_started)
+        self.voice_input_thread.listening_ended.connect(self._on_listening_ended)
+        
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -387,6 +570,19 @@ class OverlayWindow(QDialog):
             input_row = QHBoxLayout()
             input_row.setSpacing(8)
 
+            # Microphone button - for voice input
+            self.mic_button = QPushButton("🎤", self.chat_frame)
+            self.mic_button.setToolTip("Hold to speak")
+            self.mic_button.setFixedSize(36, 36)
+            self.mic_button.setStyleSheet(
+                "background: #22304a; color: #8ab4f8; border: none; font-size: 20px; border-radius: 18px;"
+            )
+            self.mic_button.setAutoDefault(False)
+            self.mic_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.mic_button.pressed.connect(self._start_voice_input)
+            self.mic_button.released.connect(self._stop_voice_input)
+            input_row.addWidget(self.mic_button)
+
             self.input_box = QLineEdit(self.chat_frame)
             self.input_box.setPlaceholderText("Type something...")
             self.input_box.setStyleSheet(
@@ -402,7 +598,19 @@ class OverlayWindow(QDialog):
             self.send_button.clicked.connect(self._on_send_clicked)
             input_row.addWidget(self.send_button)
 
-            # Add Reminders icon button (⏰) to the right of the input box
+            # Speaker button - for voice output toggle
+            self.speaker_button = QPushButton("🔊", self.chat_frame)
+            self.speaker_button.setToolTip("Toggle voice output")
+            self.speaker_button.setFixedSize(36, 36)
+            self.speaker_button.setStyleSheet(
+                "background: #22304a; color: #8ab4f8; border: none; font-size: 20px; border-radius: 18px;"
+            )
+            self.speaker_button.setAutoDefault(False)
+            self.speaker_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.speaker_button.clicked.connect(self._toggle_voice_output)
+            input_row.addWidget(self.speaker_button)
+
+            # Add Reminders icon button (⏰)
             self.reminders_icon_button = QPushButton("⏰", self.chat_frame)
             self.reminders_icon_button.setToolTip("Show all reminders")
             self.reminders_icon_button.setFixedSize(36, 36)
@@ -659,8 +867,15 @@ class OverlayWindow(QDialog):
     def _append_ai_message(self, text: str) -> None:
         """
         Append the AI's message to the chat display.
+        
+        Args:
+            text: The text message to display
         """
         self.response_display.append(f'<b style="color:#fbbc05;">TARS:</b> {text}')
+        
+        # Read the message aloud if voice output is enabled
+        if self.voice_output_enabled and "Listening..." not in text and "Thinking..." not in text:
+            self.voice_synthesizer.speak(text)
 
     def _on_ai_response(self, response: str) -> None:
         """
@@ -1192,8 +1407,8 @@ class OverlayWindow(QDialog):
                     else:
                         # Process the search normally with a timeout
                         try:
-                            print(f"DEBUG: This is a regular search with timeout=5s")
-                            results = self.file_search_handler.process_ai_command(file_search_cmd, timeout=5)
+                            print(f"DEBUG: This is a regular search with timeout=15s")
+                            results = self.file_search_handler.process_ai_command(file_search_cmd, timeout=15)
                             print(f"DEBUG: File search results: {results}")
                             
                             # Store the search pattern for context
@@ -1250,5 +1465,112 @@ class OverlayWindow(QDialog):
             print(f"ERROR in _process_json_actions: {e}")
             import traceback
             print(traceback.format_exc())
+
+    def _on_voice_text_ready(self, text: str) -> None:
+        """
+        Process text received from voice recognition.
+        
+        Args:
+            text: The recognized text from speech
+        """
+        if not text.strip():
+            return
+            
+        # Set the recognized text in the input box
+        self.input_box.setText(text)
+        
+        # Automatically submit it
+        self._on_send_clicked()
+
+    def _on_voice_input_error(self, error_message: str) -> None:
+        """
+        Handle errors from voice recognition.
+        
+        Args:
+            error_message: The error message to display
+        """
+        print(f"DEBUG: Voice input error: {error_message}")
+        self._append_ai_message(error_message)
+        
+        # Reset the mic button style
+        self.mic_button.setStyleSheet(
+            "background: #22304a; color: #8ab4f8; border: none; font-size: 20px; border-radius: 18px;"
+        )
+
+    def _start_voice_input(self) -> None:
+        """Start voice input when mic button is pressed."""
+        # Only start if not already listening
+        if not self.voice_input_thread.is_listening and not self.voice_input_thread.isRunning():
+            # Check if PyAudio is available
+            if not hasattr(self.voice_input_thread, 'pyaudio_available') or not self.voice_input_thread.pyaudio_available:
+                self._append_ai_message("Microphone error: Could not find PyAudio; check installation")
+                print("ERROR: PyAudio is not available. Voice recognition disabled.")
+                return
+                
+            # Change mic button appearance
+            self.mic_button.setStyleSheet(
+                "background: #4285f4; color: white; border: none; font-size: 20px; border-radius: 18px;"
+            )
+            self.mic_button.setToolTip("Listening... Release to stop")
+            
+            # Start the voice input thread
+            self.voice_input_thread.start()
+
+    def _stop_voice_input(self) -> None:
+        """Stop voice input when mic button is released."""
+        if self.voice_input_thread.is_listening:
+            self.voice_input_thread.stop_listening()
+
+    def _on_listening_started(self) -> None:
+        """Update UI when listening starts."""
+        # This executes in the main thread since it's connected via signal
+        self.mic_button.setStyleSheet(
+            "background: #4285f4; color: white; border: none; font-size: 20px; border-radius: 18px;"
+        )
+        self.mic_button.setToolTip("Listening... Release to stop")
+        
+        # Show listening indicator in the chat
+        self._append_ai_message("<i>Listening...</i>")
+
+    def _on_listening_ended(self) -> None:
+        """Update UI when listening ends."""
+        # This executes in the main thread since it's connected via signal
+        self.mic_button.setStyleSheet(
+            "background: #22304a; color: #8ab4f8; border: none; font-size: 20px; border-radius: 18px;"
+        )
+        self.mic_button.setToolTip("Hold to speak")
+        
+        # Remove the "Listening..." message
+        cursor = self.response_display.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+        last_block = cursor.selectedText()
+        if "Listening..." in last_block:
+            cursor.removeSelectedText()
+            cursor.deletePreviousChar()
+            self.response_display.setTextCursor(cursor)
+
+    def _toggle_voice_output(self) -> None:
+        """Toggle text-to-speech output on/off."""
+        # Toggle the state
+        self.voice_output_enabled = not self.voice_output_enabled
+        
+        # Update the button appearance
+        if self.voice_output_enabled:
+            self.speaker_button.setText("🔊")
+            self.speaker_button.setToolTip("Voice output is ON (click to disable)")
+            self.speaker_button.setStyleSheet(
+                "background: #22304a; color: #8ab4f8; border: none; font-size: 20px; border-radius: 18px;"
+            )
+            self._append_ai_message("Voice output enabled.")
+        else:
+            self.speaker_button.setText("🔇")
+            self.speaker_button.setToolTip("Voice output is OFF (click to enable)")
+            self.speaker_button.setStyleSheet(
+                "background: #22304a; color: #ff8a80; border: none; font-size: 20px; border-radius: 18px;"
+            )
+            # Stop any current speech
+            self.voice_synthesizer.stop_speaking()
+            self._append_ai_message("Voice output disabled.")
 
     # TODO: Add methods for integrating with the AI client and updating chat

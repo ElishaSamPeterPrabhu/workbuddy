@@ -128,8 +128,8 @@ class AIClient:
         }
 
         # Add system prompt with instructions for file search phases and user paths
-        self.system_prompt = f"""
-You are TARS, a helpful desktop assistant that can perform various tasks including file searches.
+        self.file_search_prompt = f"""
+
 
 IMPORTANT USER DIRECTORY INFORMATION - Use these exact paths for file operations:
 - Home Directory: {self.user_home}
@@ -140,8 +140,21 @@ IMPORTANT USER DIRECTORY INFORMATION - Use these exact paths for file operations
 - Videos: {self.user_dirs['videos']}
 - Music: {self.user_dirs['music']}
 
+When the user asks you to find files, ALWAYS use the exact directory paths listed above. Do NOT use generic paths.
+For example:
+- Use "{self.user_dirs['desktop']}" instead of "Desktop" 
+- Use "{self.user_dirs['documents']}" instead of "Documents"
+- Use "{self.user_dirs['downloads']}" instead of "Downloads"
+
+FILE SEARCH GUIDELINES:
+1. For files with specific names, search directly with the pattern: "filename.ext"
+2. For partial name matches, use wildcards: "*keyword*.ext"
+3. For file extensions, always include the appropriate pattern: "*.pdf", "*.docx", etc.
+4. When unsure about location, start with the most likely directory (Documents for documents, Downloads for downloaded files, etc.)
+5. Always include the most specific directory path possible to speed up the search
+
 When searching for files, you will use a phased approach:
-1. First, a quick search is performed in high-priority locations
+1. First, a quick search is performed in high-priority locations (timeout: 15 seconds)
 2. If files are found, you'll show the results
 3. If the quick search times out, you'll need to decide based on the user's message whether to:
    a) Continue with a more extensive search (which takes longer but searches more locations)
@@ -156,7 +169,7 @@ For file search operations, respond with JSON in this format:
   "ai_response": "I'll search for that file for you.",
   "file_search": {{
     "action": "search_files_recursive",
-    "directory": "{self.user_home}",
+    "directory": "{self.user_dirs['documents']}",
     "pattern": "example*.txt"
   }}
 }}
@@ -335,9 +348,12 @@ When the user wants to continue a search, include a "continue_search" field in y
             if hasattr(self, 'last_search_context_str') and self.last_search_context_str:
                 context = f"Context from previous searches: {self.last_search_context_str}\n\n"
             
+            # Include file search prompt with the system instructions to ensure proper path usage
+            system_instructions = self.file_search_prompt
+            
             # Use the correct Trimble API format
             current_time = self.get_current_iso_time()
-            message = f"{context}{user_message}\n\ncurrent_time: {current_time}"
+            message = f"{system_instructions}\n\n{context}{user_message}\n\ncurrent_time: {current_time}"
             
             payload = {
                 "message": message,
@@ -402,17 +418,24 @@ When the user wants to continue a search, include a "continue_search" field in y
         
         # Simple command detection for file search demos
         if "find" in user_message.lower() or "search" in user_message.lower() or "file" in user_message.lower():
+            search_term = user_message.split()[-1] if user_message.split() else ""
+            
+            # Use proper user paths
             return json.dumps({
-                "ai_response": "I'll search for that file for you.",
+                "action": "convo",
+                "is_reminder": False,
+                "ai_response": f"I'll search for files containing '{search_term}' in your Documents folder.",
                 "file_search": {
                     "action": "search_files_recursive",
-                    "pattern": "*" + user_message.split()[-1] + "*",
-                    "directory": os.path.expanduser("~\\Documents")
+                    "pattern": f"*{search_term}*",
+                    "directory": self.user_dirs["documents"]  # Use actual Documents path
                 }
             })
         
         # Default response
         return json.dumps({
+            "action": "convo",
+            "is_reminder": False,
             "ai_response": f"This is a mock response to: {user_message}"
         })
 
@@ -521,7 +544,7 @@ When the user wants to continue a search, include a "continue_search" field in y
         candidate_dirs_str = "\n".join(f"- {d}" for d in candidate_dirs)
 
         prompt = (
-            getattr(self, "system_prompt", "")
+            getattr(self, "file_search_prompt", "")
             + "\n\n"
             + f"User query: {context['user_query']}\n"
             + f"Last results: {context['last_results']}\n"
@@ -590,10 +613,13 @@ When the user wants to continue a search, include a "continue_search" field in y
         Direct call to the AI model without recursively calling get_response.
         """
         try:
+            # Include system instructions for proper path usage
+            system_instructions = self.file_search_prompt
+            
             # Prepare the message for direct API call
             current_time = self.get_current_iso_time()
             body = {
-                "message": prompt,
+                "message": f"{system_instructions}\n\n{prompt}",
                 "session_id": self.session_id,
                 "interlocutor_id": self.interlocutor_id,
                 "stream": False,
