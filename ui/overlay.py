@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QDateTimeEdit,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QCoreApplication, QTimer
-from PyQt6.QtGui import QColor, QPalette, QTextCursor
+from PyQt6.QtGui import QColor, QPalette, QTextCursor, QShortcut, QKeySequence
 from core.ai_client import AIClient
 from core import storage
 from core import scheduler
@@ -44,6 +44,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Union
+import time
 
 
 class AIWorker(QThread):
@@ -397,19 +398,39 @@ class VoiceSynthesizer:
     """
     def __init__(self) -> None:
         """Initialize the voice synthesizer engine."""
-        self.engine = pyttsx3.init()
+        # Initialize engine
+        self.init_engine()
+        
+        # Thread management
+        self.speech_queue = []
+        self.current_index = 0
         self.is_speaking = False
         self.should_stop = False
-        # Set default properties
-        self.engine.setProperty('rate', 180)  # Speed of speech
-        self.engine.setProperty('volume', 0.9)  # Volume (0.0 to 1.0)
-        # Get available voices and select a good one
-        voices = self.engine.getProperty('voices')
-        # Try to find a female voice, otherwise use default
-        for voice in voices:
-            if 'female' in voice.name.lower():
-                self.engine.setProperty('voice', voice.id)
-                break
+        self.thread = None
+        
+        # Create a lock for thread safety
+        self.lock = threading.Lock()
+    
+    def init_engine(self) -> None:
+        """Initialize or reinitialize the TTS engine."""
+        try:
+            self.engine = pyttsx3.init()
+            self.engine.setProperty('rate', 180)  # Speed of speech
+            self.engine.setProperty('volume', 0.9)  # Volume (0.0 to 1.0)
+            
+            # Get available voices and select a good one
+            try:
+                voices = self.engine.getProperty('voices')
+                # Try to find a female voice, otherwise use default
+                for voice in voices:
+                    if 'female' in voice.name.lower():
+                        self.engine.setProperty('voice', voice.id)
+                        break
+            except Exception as e:
+                print(f"WARNING: Could not set voice: {e}")
+        except Exception as e:
+            print(f"ERROR: Failed to initialize TTS engine: {e}")
+            self.engine = None
 
     def speak(self, text: str) -> None:
         """
@@ -418,51 +439,145 @@ class VoiceSynthesizer:
         Args:
             text: The text to be spoken
         """
-        if not text or self.is_speaking:
+        if not text:
             return
             
-        # Reset stop flag
-        self.should_stop = False
+        # Clean up text - strip HTML tags and code markers
+        clean_text = re.sub(r'<.*?>', '', text)
+        clean_text = re.sub(r'```.*?```', '', clean_text, flags=re.DOTALL)
         
-        def speak_worker():
-            self.is_speaking = True
+        # Split into sentences for better interruption handling
+        sentences = []
+        
+        # First split by paragraphs
+        paragraphs = clean_text.split('\n\n')
+        for para in paragraphs:
+            # Split paragraphs into sentences
+            sentence_parts = re.split(r'(?<=[.!?])\s+', para)
+            sentences.extend(sentence_parts)
+        
+        # Filter out empty sentences
+        sentences = [s for s in sentences if s.strip()]
+        
+        if not sentences:
+            sentences = [clean_text]  # Use original if splitting failed
+        
+        with self.lock:
+            # Stop any existing speech
+            if self.is_speaking:
+                self.should_stop = True
+                # Wait for the thread to clean up
+                if self.thread and self.thread.is_alive():
+                    self.thread.join(0.5)  # Wait up to 0.5 seconds
             
-            # Clean up text - strip HTML tags and code markers
-            clean_text = re.sub(r'<.*?>', '', text)
-            clean_text = re.sub(r'```.*?```', '', clean_text, flags=re.DOTALL)
+            # Reset state
+            self.speech_queue = sentences
+            self.current_index = 0
+            self.should_stop = False
             
-            # Shorten extremely long responses to first paragraph
-            if len(clean_text) > 500:
-                paragraphs = clean_text.split('\n\n')
-                clean_text = paragraphs[0]
-                if len(paragraphs) > 1:
-                    clean_text += ". There's more information available on screen."
-                    
-            print(f"DEBUG: Speaking: '{clean_text[:100]}...'")
-            
-            def on_word(name, location, length):
-                if self.should_stop:
-                    self.engine.stop()
+            # Start new thread if not already running
+            if not self.thread or not self.thread.is_alive():
+                self.thread = threading.Thread(target=self._speech_worker)
+                self.thread.daemon = True  # Allow program to exit even if thread is running
+                self.thread.start()
+    
+    def _speech_worker(self) -> None:
+        """Worker thread that runs the speech engine."""
+        self.is_speaking = True
+        
+        try:
+            # Make sure we have a valid engine
+            if not self.engine:
+                self.init_engine()
+                if not self.engine:
+                    print("ERROR: Cannot speak - no engine available")
+                    self.is_speaking = False
                     return
             
-            # Add word callback to allow stopping
-            self.engine.connect('started-word', on_word)
-            
-            # Speak the text
-            self.engine.say(clean_text)
-            self.engine.runAndWait()
-            
+            # Process speech items until done or stopped
+            while self.current_index < len(self.speech_queue) and not self.should_stop:
+                text = self.speech_queue[self.current_index]
+                
+                # Skip empty text
+                if not text.strip():
+                    self.current_index += 1
+                    continue
+                
+                try:
+                    print(f"DEBUG: Speaking item {self.current_index+1}/{len(self.speech_queue)}: '{text[:50]}...'")
+                    
+                    # Safely speak the text
+                    self.engine.say(text)
+                    self.engine.runAndWait()
+                    
+                    # Move to next item if not interrupted
+                    if not self.should_stop:
+                        self.current_index += 1
+                    else:
+                        # Increment before stopping to avoid repeating
+                        self.current_index += 1
+                        break
+                        
+                except RuntimeError as e:
+                    print(f"ERROR: Speech engine error: {e}")
+                    # Reset the engine
+                    try:
+                        self.init_engine()
+                        # Skip to next item
+                        self.current_index += 1
+                        time.sleep(0.5)  # Brief pause before continuing
+                    except Exception:
+                        # If reset fails, exit speech loop
+                        break
+                        
+                except Exception as e:
+                    print(f"ERROR: Unexpected speech error: {e}")
+                    # Skip this item and continue
+                    self.current_index += 1
+                    
+        finally:
+            # Clean up state regardless of how we exit
             self.is_speaking = False
-        
-        # Start in a separate thread to not block UI
-        threading.Thread(target=speak_worker).start()
+            if self.should_stop:
+                try:
+                    self.engine.stop()
+                except:
+                    # Last resort - just recreate the engine
+                    self.init_engine()
+    
+    def continue_speaking(self) -> None:
+        """Continue speaking from where we left off."""
+        with self.lock:
+            if not self.is_speaking and self.speech_queue and self.current_index < len(self.speech_queue):
+                self.should_stop = False
+                self.thread = threading.Thread(target=self._speech_worker)
+                self.thread.daemon = True
+                self.thread.start()
     
     def stop_speaking(self) -> None:
         """Stop the current speech."""
-        if self.is_speaking:
-            print("DEBUG: Stopping speech")
-            self.should_stop = True
-            # Stopping will happen in the word callback
+        with self.lock:
+            if self.is_speaking:
+                print("DEBUG: Stopping speech")
+                self.should_stop = True
+                try:
+                    if self.engine:
+                        self.engine.stop()
+                except Exception as e:
+                    print(f"ERROR: Failed to stop speech engine: {e}")
+                    # Try resetting the engine
+                    self.init_engine()
+    
+    def get_next_sentence(self) -> None:
+        """Skip to the next sentence."""
+        with self.lock:
+            if self.is_speaking and self.current_index < len(self.speech_queue):
+                # Stop current speech
+                self.stop_speaking()
+                # Wait a moment for the engine to reset
+                time.sleep(0.3)
+                # Continue from the next item (current_index was already incremented in stop_speaking)
+                self.continue_speaking()
 
 
 class OverlayWindow(QDialog):
@@ -600,7 +715,7 @@ class OverlayWindow(QDialog):
 
             # Speaker button - for voice output toggle
             self.speaker_button = QPushButton("🔊", self.chat_frame)
-            self.speaker_button.setToolTip("Toggle voice output")
+            self.speaker_button.setToolTip("Toggle voice output (Ctrl+S)")
             self.speaker_button.setFixedSize(36, 36)
             self.speaker_button.setStyleSheet(
                 "background: #22304a; color: #8ab4f8; border: none; font-size: 20px; border-radius: 18px;"
@@ -643,6 +758,21 @@ class OverlayWindow(QDialog):
             # Set tab order
             self.setTabOrder(self.input_box, self.send_button)
             self.setTabOrder(self.send_button, self.reminders_icon_button)
+            
+            # Set up keyboard shortcuts
+            from PyQt6.QtGui import QShortcut, QKeySequence
+            
+            # Ctrl+S: Toggle speech
+            self.toggle_speech_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
+            self.toggle_speech_shortcut.activated.connect(self._toggle_voice_output)
+            
+            # Ctrl+C: Continue speech from where it left off
+            self.continue_speech_shortcut = QShortcut(QKeySequence("Ctrl+C"), self)
+            self.continue_speech_shortcut.activated.connect(self._continue_speaking)
+            
+            # Ctrl+Space: Start/stop speech recognition
+            self.voice_input_shortcut = QShortcut(QKeySequence("Ctrl+Space"), self)
+            self.voice_input_shortcut.activated.connect(self._toggle_voice_input)
             
             print("DEBUG: UI initialization completed successfully")
         except Exception as e:
@@ -877,195 +1007,6 @@ class OverlayWindow(QDialog):
         if self.voice_output_enabled and "Listening..." not in text and "Thinking..." not in text:
             self.voice_synthesizer.speak(text)
 
-    def _on_ai_response(self, response: str) -> None:
-        """
-        Display the AI's response in the chat display.
-        """
-        print(f"DEBUG: _on_ai_response received raw response: {response[:100]}...")
-        
-        # Remove the last 'Thinking...' message if present
-        cursor = self.response_display.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
-        last_block = cursor.selectedText()
-        if "Thinking..." in last_block:
-            cursor.removeSelectedText()
-            cursor.deletePreviousChar()
-            self.response_display.setTextCursor(cursor)
-        
-        # Clear out any markdown code block formatting, etc.
-        # This is the main fix to handle the JSON formatting issue
-        cleaned_response = response
-        
-        # First look for ```json blocks specifically
-        json_block_pattern = r'```json\s*(.*?)\s*```'
-        json_blocks = re.findall(json_block_pattern, response, re.DOTALL)
-        if json_blocks:
-            print(f"DEBUG: Found {len(json_blocks)} JSON code blocks")
-            # Use the first JSON block found
-            cleaned_response = json_blocks[0].strip()
-            print(f"DEBUG: Extracted JSON from code block: {cleaned_response[:100]}...")
-        else:
-            # Try other patterns to find JSON objects
-            code_block_pattern = r'```\s*(.*?)\s*```'
-            code_blocks = re.findall(code_block_pattern, response, re.DOTALL)
-            if code_blocks:
-                # Check if any code block contains valid JSON
-                for block in code_blocks:
-                    try:
-                        # If this parses as JSON, use it
-                        json.loads(block.strip())
-                        cleaned_response = block.strip()
-                        print(f"DEBUG: Found JSON in general code block: {cleaned_response[:100]}...")
-                        break
-                    except:
-                        continue
-        
-        # Try to parse the cleaned response as JSON
-        try:
-            response_json = json.loads(cleaned_response)
-            print(f"DEBUG: Successfully parsed JSON: {response_json}")
-            
-            # Process JSON actions and get user-facing message
-            if "ai_response" in response_json:
-                # Extract the user-facing message
-                user_message = response_json["ai_response"]
-                
-                # Check if this is a file search request (don't display standard message)
-                is_file_search = "file_search" in response_json and isinstance(response_json["file_search"], dict)
-                
-                # Only display the user message if it's not a file search or if we want to show both
-                if not is_file_search:
-                    # Show only the user-facing message first
-                    self._append_ai_message(user_message)
-                
-                # Process any actions in the background (will handle displaying file search results)
-                self._process_json_actions(response_json)
-                return
-            
-            # Handle special case for reminder data requests
-            if "action" in response_json and response_json["action"] == "request_data" and response_json.get("data_type") == "reminders":
-                self._handle_reminder_data_request(response_json)
-                return
-        except json.JSONDecodeError:
-            print(f"DEBUG: Failed to parse as JSON: {cleaned_response[:100]}...")
-            # If it's not valid JSON, just display the original response
-            self._append_ai_message(response)
-    
-    def _handle_reminder_data_request(self, request_json: dict) -> None:
-        """
-        Process a request for reminder data from the AI.
-        
-        Args:
-            request_json: The parsed JSON request from the AI
-        """
-        print("DEBUG: Processing request for reminder data")
-        # Get all reminders from storage
-        reminders = storage.get_all_reminders()
-        
-        if not reminders:
-            self._append_ai_message("You don't have any reminders to edit.")
-            return
-        
-        # Format reminders for the AI
-        formatted_reminders = []
-        for reminder_id, message, remind_at, is_done in reminders:
-            if is_done == 0:  # Only include pending reminders
-                try:
-                    dt = datetime.datetime.fromisoformat(remind_at)
-                    formatted_time = dt.strftime("%b %d, %Y, %I:%M %p")
-                except:
-                    formatted_time = remind_at
-                
-                formatted_reminders.append({
-                    "id": reminder_id,
-                    "message": message,
-                    "time": formatted_time,
-                    "original_time": remind_at
-                })
-        
-        if not formatted_reminders:
-            self._append_ai_message("You don't have any pending reminders to edit.")
-            return
-        
-        # Get the original user text
-        original_user_text = self.user_text if hasattr(self, 'user_text') else ""
-        print(f"DEBUG: Original user request was: {original_user_text}")
-        
-        # Create an AI request with the original user message and the reminders data
-        ai_request = f"{original_user_text}\n\nAVAILABLE_REMINDERS: {json.dumps(formatted_reminders)}"
-        print(f"DEBUG: Sending reminders data to AI: {ai_request[:100]}...")
-        
-        # Process the request with the AI to get the proper edit action
-        try:
-            ai_response = self.ai_client.get_response(ai_request)
-            print(f"DEBUG: AI response with reminders data: {ai_response[:100]}...")
-            
-            # Process the AI's response with the new JSON handling logic
-            self._on_ai_response(ai_response)
-        except Exception as e:
-            print(f"ERROR getting AI decision for reminders: {e}")
-            # Fall back to showing the reminders list
-            reminder_list = "\n".join([f"{i+1}. {r['message']} (at {r['time']})" for i, r in enumerate(formatted_reminders)])
-            self._append_ai_message(f"Here are your pending reminders. Please specify which one you'd like to edit:\n\n{reminder_list}")
-            
-        return
-
-    def _on_ai_worker_timeout(self) -> None:
-        """Handle case where AI worker hasn't responded within the maximum wait time."""
-        print("DEBUG: AI worker timeout triggered - forcing UI to re-enable")
-        if self._ai_worker and self._ai_worker.isRunning():
-            # Don't wait for the worker, just re-enable the UI
-            # The thread will eventually finish or be cleaned up later
-            print("WARNING: AI worker still running after timeout")
-        
-        cursor = self.response_display.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
-        last_block = cursor.selectedText()
-        if "Thinking..." in last_block:
-            cursor.removeSelectedText()
-            cursor.deletePreviousChar()
-            self.response_display.setTextCursor(cursor)
-            self._append_ai_message("I'm taking longer than expected. The UI has been re-enabled so you can continue working.")
-        
-        # Re-enable input
-        self.input_box.setDisabled(False)
-        self.send_button.setDisabled(False)
-        self.input_box.setFocus()
-
-    def _on_ai_worker_error(self, error_message: str) -> None:
-        """Handle errors reported by the AI worker thread."""
-        print(f"DEBUG: AI worker reported error: {error_message}")
-        cursor = self.response_display.textCursor()
-        cursor.movePosition(QTextCursor.MoveOperation.End)
-        cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
-        last_block = cursor.selectedText()
-        if "Thinking..." in last_block:
-            cursor.removeSelectedText()
-            cursor.deletePreviousChar()
-            self.response_display.setTextCursor(cursor)
-        
-        self._append_ai_message(error_message)
-        
-        # Re-enable input
-        self.input_box.setDisabled(False)
-        self.send_button.setDisabled(False)
-        self.input_box.setFocus()
-
-    def _on_ai_worker_finished(self) -> None:
-        """
-        Re-enable input after AI response is received.
-        """
-        print("DEBUG: AI worker thread finished")
-        # Cancel the watchdog timer
-        if hasattr(self, 'input_watchdog') and self.input_watchdog.isActive():
-            self.input_watchdog.stop()
-        
-        self.input_box.setDisabled(False)
-        self.send_button.setDisabled(False)
-        self.input_box.setFocus()
-
     def _show_reminders_dialog(self) -> None:
         print("DEBUG: _show_reminders_dialog called")
         self.reminder_dialog = RemindersDialog(self)
@@ -1152,6 +1093,97 @@ class OverlayWindow(QDialog):
             self.send_button.setDisabled(False)
             self.input_box.setFocus()
             
+    def _on_ai_response(self, response: str) -> None:
+        """
+        Process AI worker response.
+        
+        Args:
+            response: The response from the AI worker
+        """
+        try:
+            # Get rid of the "Thinking..." message
+            cursor = self.response_display.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.select(QTextCursor.SelectionType.BlockUnderCursor)
+            last_block = cursor.selectedText()
+            if "Thinking..." in last_block:
+                cursor.removeSelectedText()
+                cursor.deletePreviousChar()
+                self.response_display.setTextCursor(cursor)
+                
+            # Check if response is a JSON code block (```json ... ```)
+            import json
+            import re
+            
+            json_match = re.match(r"```json\s*(.*?)\s*```", response, re.DOTALL)
+            if json_match:
+                try:
+                    # Extract and parse JSON from code block
+                    json_str = json_match.group(1)
+                    json_obj = json.loads(json_str)
+                    print(f"DEBUG: Extracted JSON from code block: {json_str[:100]}...")
+                    print(f"DEBUG: Successfully parsed JSON: {json_obj}")
+                    
+                    # Check if this is a GitHub action - if so, don't show the initial response
+                    # as _process_json_actions will handle the display
+                    is_github_action = "action" in json_obj and json_obj["action"] in [
+                        "github_notifications", "github_prs", "github_repos", 
+                        "github_activity", "github_prs_for_repo"
+                    ]
+                    
+                    # If not a GitHub action, display the AI's response text
+                    if not is_github_action and "ai_response" in json_obj:
+                        ai_response = json_obj.get("ai_response", "")
+                        if ai_response:
+                            self._append_ai_message(ai_response)
+                    
+                    # Process any actions in the JSON
+                    self._process_json_actions(json_obj)
+                except json.JSONDecodeError as e:
+                    print(f"ERROR: Invalid JSON in response: {e}")
+                    self._append_ai_message(f"Sorry, I received an invalid response. Please try again.")
+            else:
+                # If not JSON, display as plain text response
+                self._append_ai_message(response)
+        except Exception as e:
+            import traceback
+            print(f"ERROR in _on_ai_response: {e}")
+            print(traceback.format_exc())
+            self._append_ai_message(f"Sorry, I encountered an error: {str(e)}")
+        finally:
+            # Re-enable input regardless of what happened
+            if hasattr(self, 'input_watchdog') and self.input_watchdog.isActive():
+                self.input_watchdog.stop()
+            self.input_box.setDisabled(False)
+            self.send_button.setDisabled(False)
+            self.input_box.setFocus()
+            
+    def _on_ai_worker_timeout(self) -> None:
+        """Handle the case where the AI worker takes too long."""
+        print("DEBUG: AI worker timeout occurred")
+        if self._ai_worker and self._ai_worker.isRunning():
+            self._ai_worker.cancel()
+        self._append_ai_message("Sorry, it's taking me longer than expected to process your request. Please try again with a simpler question.")
+        self.input_box.setDisabled(False)
+        self.send_button.setDisabled(False)
+        self.input_box.setFocus()
+        
+    def _on_ai_worker_error(self, error_message: str) -> None:
+        """Handle errors from the AI worker."""
+        print(f"DEBUG: AI worker error: {error_message}")
+        self._append_ai_message(error_message)
+        self.input_box.setDisabled(False)
+        self.send_button.setDisabled(False)
+        self.input_box.setFocus()
+        
+    def _on_ai_worker_finished(self) -> None:
+        """Clean up when the AI worker finishes."""
+        # Make sure UI is re-enabled (belt and suspenders approach)
+        if hasattr(self, 'input_watchdog') and self.input_watchdog.isActive():
+            self.input_watchdog.stop()
+        self.input_box.setDisabled(False)
+        self.send_button.setDisabled(False)
+    
     def _process_json_actions(self, response_json: dict) -> None:
         """
         Process any actions in the JSON response in the background.
@@ -1247,8 +1279,10 @@ class OverlayWindow(QDialog):
                     print(f"DEBUG: Processing GitHub action: {action}")
                     # Get the API response for display
                     try:
+                        # Display initial message - note this is now displayed in _on_ai_response 
+                        # to avoid duplication
                         ai_response = response_json.get("ai_response", "Let me check your GitHub information...")
-                        # Display initial message
+                        # We'll display this message only here instead of in both places
                         self._append_ai_message(ai_response)
                         
                         # Execute the appropriate GitHub API call based on the action
@@ -1562,7 +1596,24 @@ class OverlayWindow(QDialog):
             self.speaker_button.setStyleSheet(
                 "background: #22304a; color: #8ab4f8; border: none; font-size: 20px; border-radius: 18px;"
             )
-            self._append_ai_message("Voice output enabled.")
+            # If there's speech in the queue, offer to continue
+            if self.voice_synthesizer.speech_queue and self.voice_synthesizer.current_index < len(self.voice_synthesizer.speech_queue):
+                self._append_ai_message("Voice output enabled. Would you like me to continue speaking from where I left off?")
+                
+                # Add a "Continue Reading" button temporarily
+                continue_button = QPushButton("▶️ Continue Reading", self.chat_frame)
+                continue_button.setStyleSheet(
+                    "background: #2a3959; color: #8ab4f8; border: none; font-size: 14px; border-radius: 8px; padding: 8px 16px;"
+                )
+                continue_button.clicked.connect(self._continue_speaking)
+                
+                # Add to layout temporarily
+                self.chat_frame.layout().addWidget(continue_button)
+                
+                # Remove button after 10 seconds
+                QTimer.singleShot(10000, lambda: self._remove_widget(continue_button))
+            else:
+                self._append_ai_message("Voice output enabled.")
         else:
             self.speaker_button.setText("🔇")
             self.speaker_button.setToolTip("Voice output is OFF (click to enable)")
@@ -1572,5 +1623,40 @@ class OverlayWindow(QDialog):
             # Stop any current speech
             self.voice_synthesizer.stop_speaking()
             self._append_ai_message("Voice output disabled.")
+    
+    def _continue_speaking(self) -> None:
+        """Continue speaking from where it was interrupted."""
+        if self.voice_output_enabled and not self.voice_synthesizer.is_speaking:
+            self.voice_synthesizer.continue_speaking()
+    
+    def _remove_widget(self, widget: QWidget) -> None:
+        """Remove a widget from the layout."""
+        if widget and not widget.isHidden():
+            widget.setParent(None)
+            widget.deleteLater()
+
+    def _toggle_voice_input(self) -> None:
+        """Toggle voice input on/off with keyboard shortcut."""
+        if self.voice_input_thread.is_listening:
+            # If listening, stop
+            self._stop_voice_input()
+        else:
+            # If not listening, start
+            # Check if PyAudio is available first
+            if not hasattr(self.voice_input_thread, 'pyaudio_available') or not self.voice_input_thread.pyaudio_available:
+                self._append_ai_message("Microphone error: Could not find PyAudio; check installation")
+                print("ERROR: PyAudio is not available. Voice recognition disabled.")
+                return
+                
+            # Start listening
+            self._append_ai_message("<i>Listening...</i>")
+            self.mic_button.setStyleSheet(
+                "background: #4285f4; color: white; border: none; font-size: 20px; border-radius: 18px;"
+            )
+            self.mic_button.setToolTip("Listening... Press Ctrl+Space to stop")
+            
+            # Start the voice input thread
+            if not self.voice_input_thread.isRunning():
+                self.voice_input_thread.start()
 
     # TODO: Add methods for integrating with the AI client and updating chat
