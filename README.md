@@ -112,6 +112,22 @@ This will:
 - "Search for [topic]" - Perform web searches (when configured)
 - "Tell me about [topic]" - Ask for information
 
+### Voice Commands
+
+WorkBuddy now supports full voice functionality:
+
+- **Speech-to-Text**: Click and hold the microphone button (🎤) to speak your commands
+- **Text-to-Speech**: Toggle the speaker button (🔊/🔇) to enable or disable voice responses
+- **Hands-Free Operation**: Listen to responses while you work on other tasks
+- **Smart Filtering**: Voice responses are automatically cleaned and shortened for better listening
+
+Voice commands work just like text commands - simply speak naturally and WorkBuddy will understand you. For example:
+- "Find my GitHub pull requests"
+- "Set a reminder for tomorrow at 9 AM to check email"
+- "What files do I have in the Documents folder?"
+
+The voice functionality requires an internet connection for speech recognition (using Google's speech recognition service).
+
 ### System Tray
 
 - **Left-click**: Open the WorkBuddy chat interface
@@ -137,7 +153,13 @@ You can customize the appearance and behavior by modifying the following files:
 
 ## Troubleshooting
 
-- **Speech recognition issues**: Make sure your microphone is working correctly and that you have an internet connection for Google's speech recognition service
+- **Speech recognition issues**: 
+  - Make sure your microphone is working correctly and that you have an internet connection for Google's speech recognition service
+  - If you see "Could not find PyAudio; check installation" errors, you need to install PyAudio:
+    - Windows: `pip install pipwin && pipwin install pyaudio`
+    - Mac: `brew install portaudio && pip install pyaudio`
+    - Linux: `sudo apt-get install python3-pyaudio` or equivalent for your distribution
+
 - **Missing API responses**: Check your internet connection and that the Trimble API is accessible
 - **Startup problems**: Run `setup_startup.py --disable` and then `setup_startup.py --enable` again
 
