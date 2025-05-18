@@ -324,6 +324,8 @@ class OverlayWindow(QDialog):
         self.waiting_for_search_confirmation = False
         # Track the reminders dialog
         self.reminder_dialog: Optional[RemindersDialog] = None
+        # Store suggested repo for confirmation
+        self.suggested_repo = None
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -574,6 +576,51 @@ class OverlayWindow(QDialog):
             
         # Store the user's text for context in reminder processing
         self.user_text = user_text
+        
+        # Handle direct "yes" responses to GitHub repository suggestion
+        if hasattr(self, 'suggested_repo') and self.suggested_repo and user_text.lower() in ["yes", "y", "yeah", "correct", "that's right"]:
+            print(f"DEBUG: User confirmed repository: {self.suggested_repo}")
+            self.input_box.clear()
+            self._append_user_message(user_text)
+            self._append_ai_message(f"Finding pull requests for {self.suggested_repo}...")
+            
+            # Get PRs for the confirmed repo
+            try:
+                result = scheduler.github_integration.get_pull_requests_for_repo(self.suggested_repo)
+                
+                if isinstance(result, list):
+                    if len(result) == 0:
+                        formatted_result = f"You don't have any open pull requests for {self.suggested_repo}."
+                    else:
+                        items = [f"- [{pr['repo']}] #{pr['number']}: {pr['title']}" for pr in result[:10]]
+                        if len(result) > 10:
+                            items.append(f"...and {len(result) - 10} more pull requests")
+                        formatted_result = f"Here are the open pull requests for {self.suggested_repo}:\n\n" + "\n".join(items)
+                    
+                    self._append_ai_message(formatted_result)
+                elif isinstance(result, dict) and "error" in result:
+                    self._append_ai_message(f"Error accessing GitHub: {result['error']}")
+                else:
+                    self._append_ai_message(f"I couldn't retrieve pull requests for {self.suggested_repo}.")
+            
+            except Exception as e:
+                print(f"ERROR getting PRs for confirmed repo: {e}")
+                self._append_ai_message(f"I encountered an error while trying to access GitHub: {str(e)}")
+                
+            # Clear the suggested repo
+            self.suggested_repo = None
+            return
+        
+        # Handle direct "yes" responses to pending search continuation
+        if self.pending_search_command and user_text.lower() in ["yes", "y", "continue", "sure", "yr"]:
+            print("DEBUG: User confirmed extended search")
+            self.input_box.clear()
+            self._append_user_message(user_text)
+            self._append_ai_message("<i>Searching extensively...</i>")
+            
+            # Run the extended search (now with a higher timeout)
+            self._run_extended_search()
+            return
             
         # Let the AI handle all decisions naturally
         self.input_box.clear()
@@ -669,11 +716,16 @@ class OverlayWindow(QDialog):
                 # Extract the user-facing message
                 user_message = response_json["ai_response"]
                 
-                # Process any actions in the background
-                self._process_json_actions(response_json)
+                # Check if this is a file search request (don't display standard message)
+                is_file_search = "file_search" in response_json and isinstance(response_json["file_search"], dict)
                 
-                # Show only the user-facing message
-                self._append_ai_message(user_message)
+                # Only display the user message if it's not a file search or if we want to show both
+                if not is_file_search:
+                    # Show only the user-facing message first
+                    self._append_ai_message(user_message)
+                
+                # Process any actions in the background (will handle displaying file search results)
+                self._process_json_actions(response_json)
                 return
             
             # Handle special case for reminder data requests
@@ -815,10 +867,11 @@ class OverlayWindow(QDialog):
         try:
             if not self.pending_search_command:
                 print("ERROR: No pending search command to continue")
-                self.result_ready.emit("I'm sorry, I lost track of what we were searching for. Could you please try again?")
+                self._append_ai_message("I'm sorry, I lost track of what we were searching for. Could you please try again?")
                 return
                 
             # Call the continue_search method to perform extended search
+            print(f"DEBUG: Running extended search with command: {self.pending_search_command}")
             results = self.file_search_handler.continue_search(self.pending_search_command)
             print(f"DEBUG: Extended search results: {results}")
             
@@ -867,13 +920,23 @@ class OverlayWindow(QDialog):
             # Update the UI with results
             self._append_ai_message(response)
             
+            # Re-enable input
+            self.input_box.setDisabled(False)
+            self.send_button.setDisabled(False)
+            self.input_box.setFocus()
+            
         except Exception as e:
             import traceback
             print(f"ERROR in extended search: {e}")
             print(traceback.format_exc())
             self._append_ai_message(f"Sorry, there was an error during the extended search: {str(e)}")
             self.pending_search_command = None
-
+            
+            # Re-enable input
+            self.input_box.setDisabled(False)
+            self.send_button.setDisabled(False)
+            self.input_box.setFocus()
+            
     def _process_json_actions(self, response_json: dict) -> None:
         """
         Process any actions in the JSON response in the background.
@@ -964,12 +1027,225 @@ class OverlayWindow(QDialog):
                     except Exception as e:
                         print(f"ERROR deleting reminder: {e}")
                 
+                # Handle GitHub actions
+                elif action in ["github_notifications", "github_prs", "github_repos", "github_activity", "github_prs_for_repo"]:
+                    print(f"DEBUG: Processing GitHub action: {action}")
+                    # Get the API response for display
+                    try:
+                        ai_response = response_json.get("ai_response", "Let me check your GitHub information...")
+                        # Display initial message
+                        self._append_ai_message(ai_response)
+                        
+                        # Execute the appropriate GitHub API call based on the action
+                        result = None
+                        if action == "github_notifications":
+                            result = scheduler.github_integration.get_notifications()
+                        elif action == "github_prs":
+                            result = scheduler.github_integration.get_pull_requests()
+                        elif action == "github_repos":
+                            result = scheduler.github_integration.get_repos(limit=20)
+                        elif action == "github_activity":
+                            result = scheduler.github_integration.get_recent_activity()
+                        elif action == "github_prs_for_repo":
+                            repo = response_json.get("repo", "")
+                            user = response_json.get("user", None)
+                            
+                            if not repo:
+                                self._append_ai_message("I need a repository name to check pull requests.")
+                                return
+                                
+                            # Check if the repo follows owner/repo format
+                            if '/' not in repo:
+                                # Need to find the full repo name using fuzzy matching
+                                # First get all repos
+                                all_repos = scheduler.github_integration.get_repos(limit=50)
+                                
+                                if isinstance(all_repos, dict) and "error" in all_repos:
+                                    self._append_ai_message(f"Error accessing GitHub repositories: {all_repos['error']}")
+                                    return
+                                
+                                # Find closest match using fuzzy matching
+                                best_match = None
+                                best_score = 0
+                                
+                                if isinstance(all_repos, list):
+                                    import difflib
+                                    repo_query = repo.lower()
+                                    
+                                    for repo_info in all_repos:
+                                        full_name = repo_info.get('full_name', '')
+                                        repo_name = full_name.split('/')[-1] if '/' in full_name else full_name
+                                        
+                                        # Calculate similarity scores
+                                        full_name_score = difflib.SequenceMatcher(None, repo_query, full_name.lower()).ratio()
+                                        repo_name_score = difflib.SequenceMatcher(None, repo_query, repo_name.lower()).ratio()
+                                        
+                                        # Use the better score of the two
+                                        score = max(full_name_score, repo_name_score)
+                                        
+                                        if score > best_score:
+                                            best_score = score
+                                            best_match = full_name
+                                
+                                # Based on confidence level
+                                if best_score > 0.8:
+                                    # High confidence - use the match directly
+                                    repo = best_match
+                                    self._append_ai_message(f"Finding pull requests for {repo}...")
+                                elif best_score > 0.6:
+                                    # Medium confidence - suggest but ask for confirmation
+                                    self._append_ai_message(f"Did you mean the repository '{best_match}'? If not, please provide the full repository name in 'owner/repo' format.")
+                                    # Store this for next user command
+                                    self.suggested_repo = best_match
+                                    return
+                                else:
+                                    # Low confidence - list possible repositories
+                                    possible_repos = []
+                                    for repo_info in all_repos[:10]:  # Limit to top 10
+                                        possible_repos.append(f"- {repo_info.get('full_name', '')}")
+                                    
+                                    repo_list = "\n".join(possible_repos)
+                                    self._append_ai_message(f"I'm not sure which repository you're referring to. Here are some possibilities:\n{repo_list}\n\nPlease specify the full repository name in 'owner/repo' format.")
+                                    return
+                            
+                            # By this point, repo should be in owner/repo format
+                            repo_parts = repo.split('/')
+                            if len(repo_parts) == 2:
+                                owner, repo_name = repo_parts
+                                result = scheduler.github_integration.get_pull_requests_for_repo(repo, user=user)
+                            else:
+                                self._append_ai_message(f"Invalid repository format: {repo}. Please use the format 'owner/repo'.")
+                                return
+                        
+                        print(f"DEBUG: GitHub API result: {result}")
+                        
+                        # Format the result for display
+                        if isinstance(result, list) and result:
+                            # Process successful response
+                            if action == "github_notifications":
+                                if len(result) == 0:
+                                    formatted_result = "You don't have any GitHub notifications."
+                                else:
+                                    items = [f"- [{n['repository']}] {n['subject']} ({n['reason']})" for n in result[:10]]
+                                    if len(result) > 10:
+                                        items.append(f"...and {len(result) - 10} more notifications")
+                                    formatted_result = "Here are your GitHub notifications:\n\n" + "\n".join(items)
+                            
+                            elif action == "github_prs" or action == "github_prs_for_repo":
+                                if len(result) == 0:
+                                    repo_text = f" for {response_json.get('repo', '')}" if action == "github_prs_for_repo" else ""
+                                    formatted_result = f"You don't have any open pull requests{repo_text}."
+                                else:
+                                    items = [f"- [{pr['repo']}] #{pr['number']}: {pr['title']}" for pr in result[:10]]
+                                    if len(result) > 10:
+                                        items.append(f"...and {len(result) - 10} more pull requests")
+                                    
+                                    if action == "github_prs_for_repo":
+                                        repo_name = response_json.get('repo', '')
+                                        formatted_result = f"Here are the open pull requests for {repo_name}:\n\n" + "\n".join(items)
+                                    else:
+                                        formatted_result = "Here are your open pull requests:\n\n" + "\n".join(items)
+                            
+                            elif action == "github_repos":
+                                items = [f"- {repo['full_name']} ({repo['language'] or 'No language'}, ★{repo['stars']})" for repo in result[:10]]
+                                if len(result) > 10:
+                                    items.append(f"...and {len(result) - 10} more repositories")
+                                formatted_result = "Here are your GitHub repositories:\n\n" + "\n".join(items)
+                            
+                            elif action == "github_activity":
+                                items = [f"- {activity['type']} in {activity['repo']} by {activity['actor']}" for activity in result[:10]]
+                                if len(result) > 10:
+                                    items.append(f"...and {len(result) - 10} more activities")
+                                formatted_result = "Here is your recent GitHub activity:\n\n" + "\n".join(items)
+                            
+                            # Display the formatted result
+                            self._append_ai_message(formatted_result)
+                        
+                        elif isinstance(result, dict) and "error" in result:
+                            # Process error response
+                            self._append_ai_message(f"Error accessing GitHub: {result['error']}")
+                        
+                        else:
+                            # Handle unexpected response
+                            self._append_ai_message("I couldn't retrieve your GitHub information. Make sure your GitHub token is configured correctly.")
+                    
+                    except Exception as e:
+                        print(f"ERROR processing GitHub action: {e}")
+                        import traceback
+                        print(traceback.format_exc())
+                        self._append_ai_message(f"I encountered an error while trying to access GitHub: {str(e)}")
+            
             # Process file search actions if present
             if "file_search" in response_json:
                 file_search_cmd = response_json["file_search"]
                 if isinstance(file_search_cmd, dict) and "action" in file_search_cmd:
-                    print(f"DEBUG: Processing background file search command: {file_search_cmd}")
-                    # This will be processed in the main method
+                    print(f"DEBUG: Processing file search command: {file_search_cmd}")
+                    
+                    # Check if this is a continue search or extended search request
+                    is_continue = file_search_cmd.get("continue_search", False)
+                    is_extended = file_search_cmd.get("extended_search", False)
+                    
+                    if is_continue or is_extended:
+                        # Store the command for continuation and ask for confirmation
+                        self.pending_search_command = file_search_cmd
+                        self._append_ai_message("This search may take longer than usual. Would you like me to continue searching? Type 'yes' to proceed.")
+                    else:
+                        # Process the search normally with a timeout
+                        try:
+                            print(f"DEBUG: This is a regular search with timeout=5s")
+                            results = self.file_search_handler.process_ai_command(file_search_cmd, timeout=5)
+                            print(f"DEBUG: File search results: {results}")
+                            
+                            # Store the search pattern for context
+                            pattern = file_search_cmd.get("pattern", "")
+                            directory = file_search_cmd.get("directory", "")
+                            
+                            if results.get("success"):
+                                if results.get("count", 0) > 0 and "files" in results:
+                                    # Store results for future reference
+                                    self.last_search_results = results["files"]
+                                    
+                                    # Create a simple string summary for AI context
+                                    found_files_string = ""
+                                    if len(results["files"]) == 1:
+                                        filepath = results["files"][0]
+                                        filename = os.path.basename(filepath)
+                                        file_dir = os.path.dirname(filepath)
+                                        found_files_string = f"Found the file '{filename}' at location: {filepath}"
+                                    else:
+                                        found_files_string = f"Found {len(results['files'])} files matching '{pattern}' in {directory}"
+                                        
+                                    # Save context for follow-up questions
+                                    self.ai_client.last_search_context_str = found_files_string
+                                    
+                                    # Format files for display
+                                    files_list = []
+                                    for file_path in results["files"][:10]:
+                                        filename = os.path.basename(file_path)
+                                        file_dir = os.path.dirname(file_path)
+                                        files_list.append(f"- {filename} (located in {file_dir})")
+                                        
+                                    if len(results["files"]) > 10:
+                                        files_list.append(f"...and {len(results['files']) - 10} more files")
+                                    
+                                    files_text = "\n".join(files_list)
+                                    self._append_ai_message(f"{found_files_string}\n\n{files_text}")
+                                else:
+                                    if "search_phase" in results and results["search_phase"] == "quick":
+                                        # Quick search found nothing, offer extended search
+                                        self.pending_search_command = file_search_cmd
+                                        self.pending_search_command["extended_search"] = True
+                                        self._append_ai_message(f"I couldn't find any files matching '{pattern}' in my quick search of {directory}. Would you like me to perform a more extensive search? Type 'yes' to continue.")
+                                    else:
+                                        self._append_ai_message(f"I couldn't find any files matching '{pattern}' in {directory}.")
+                            else:
+                                self._append_ai_message(f"I ran into an issue while searching: {results.get('error', 'Unknown error')}")
+                        except Exception as e:
+                            print(f"ERROR in file search: {e}")
+                            import traceback
+                            print(traceback.format_exc())
+                            self._append_ai_message(f"Sorry, there was an error during the file search: {str(e)}")
+                
         except Exception as e:
             print(f"ERROR in _process_json_actions: {e}")
             import traceback

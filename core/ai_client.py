@@ -38,6 +38,7 @@ import difflib
 import logging
 from integrations.github import GitHubIntegration
 import fnmatch
+from pathlib import Path
 import time
 
 
@@ -111,9 +112,33 @@ class AIClient:
         self.session_id = "session_id1"
         self.interlocutor_id = "interlocutor_id"
 
-        # Add system prompt with instructions for file search phases
-        self.system_prompt = """
+        # Get user path information
+        self.user_home = str(Path.home())
+        self.username = os.path.basename(self.user_home)
+        
+        # Common user directories
+        self.user_dirs = {
+            "home": self.user_home,
+            "desktop": os.path.join(self.user_home, "Desktop"),
+            "documents": os.path.join(self.user_home, "Documents"),
+            "downloads": os.path.join(self.user_home, "Downloads"),
+            "pictures": os.path.join(self.user_home, "Pictures"),
+            "videos": os.path.join(self.user_home, "Videos"),
+            "music": os.path.join(self.user_home, "Music"),
+        }
+
+        # Add system prompt with instructions for file search phases and user paths
+        self.system_prompt = f"""
 You are TARS, a helpful desktop assistant that can perform various tasks including file searches.
+
+IMPORTANT USER DIRECTORY INFORMATION - Use these exact paths for file operations:
+- Home Directory: {self.user_home}
+- Desktop: {self.user_dirs['desktop']}
+- Documents: {self.user_dirs['documents']}
+- Downloads: {self.user_dirs['downloads']}
+- Pictures: {self.user_dirs['pictures']}
+- Videos: {self.user_dirs['videos']}
+- Music: {self.user_dirs['music']}
 
 When searching for files, you will use a phased approach:
 1. First, a quick search is performed in high-priority locations
@@ -125,33 +150,33 @@ When searching for files, you will use a phased approach:
 
 For file search operations, respond with JSON in this format:
 ```json
-{
+{{
   "action": "convo",
   "is_reminder": false,
   "ai_response": "I'll search for that file for you.",
-  "file_search": {
+  "file_search": {{
     "action": "search_files_recursive",
-    "directory": "C:\\",
+    "directory": "{self.user_home}",
     "pattern": "example*.txt"
-  }
-}
+  }}
+}}
 ```
 
 When the user asks about previous search results or file locations, use the context provided to give details about where files were found.
 
 When the user wants to continue a search, include a "continue_search" field in your JSON response:
 ```json
-{
+{{
   "action": "convo",
   "is_reminder": false,
   "ai_response": "I'll continue searching in more locations.",
-  "file_search": {
+  "file_search": {{
     "action": "search_files_recursive",
-    "directory": "C:\\",
+    "directory": "{self.user_home}",
     "pattern": "example*.txt",
     "continue_search": true
-  }
-}
+  }}
+}}
 ```
 """
 
@@ -176,7 +201,6 @@ When the user wants to continue a search, include a "continue_search" field in y
         self.max_retries = 2
 
         # User context for more helpful responses
-        self.username = os.environ.get("USERNAME", "user")
         self.last_search_context_str = ""
         self.logger = logging.getLogger(__name__)
 

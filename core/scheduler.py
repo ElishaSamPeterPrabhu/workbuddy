@@ -80,21 +80,7 @@ def cancel_reminder(reminder_id: int) -> None:
 
 def get_all_reminders_with_status() -> list[dict]:
     """Get all reminders with their status as a string."""
-    with get_connection() as conn:
-        c = conn.cursor()
-        c.execute(
-            "SELECT id, message, remind_at, is_done FROM reminders ORDER BY remind_at ASC"
-        )
-        rows = c.fetchall()
-        return [
-            {
-                "id": row[0],
-                "message": row[1],
-                "remind_at": row[2],
-                "status": "Pending" if row[3] == 0 else "Done",
-            }
-            for row in rows
-        ]
+    return storage.get_all_reminders_with_status()
 
 
 def reschedule_reminder(
