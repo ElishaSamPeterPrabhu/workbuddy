@@ -98,11 +98,7 @@ class AIClient:
         # Trimble API setup
         self.assistant_id = "work-buddy"
         self.base_url = f"https://agw.construction-integration.trimble.cloud/trimbledeveloperprogram/assistants/v1/agents/{self.assistant_id}/messages"
-        # self.access_token = os.environ.get(
-        #     "TRIMBLE_API_TOKEN",
-        #     "eyJhbGciOiJSUzI1NiIsImtpZCI6IjEiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2lkLnRyaW1ibGUuY29tIiwiZXhwIjoxNzQ1MzM3MTcwLCJuYmYiOjE3NDUzMzM1NzAsImlhdCI6MTc0NTMzMzU3MCwianRpIjoiYzdhM2ZmMDkxMmRiNGI0MmEzMWE1MDVjZTNkZmMyNzgiLCJqd3RfdmVyIjoyLCJzdWIiOiIwYzhkOGUwZC02MDU4LTQ2MGItYjExYS0xYTExMjE4NmFkNjQiLCJhcHBsaWNhdGlvbl9uYW1lIjoicmVsZWFzZS1ub3RlcyIsImlkZW50aXR5X3R5cGUiOiJhcHBsaWNhdGlvbiIsImF1dGhfdGltZSI6MTc0NTMzMzU3MCwiYW1yIjpbImNsaWVudF9jcmVkZW50aWFscyJdLCJhdWQiOlsiMGM4ZDhlMGQtNjA1OC00NjBiLWIxMWEtMWExMTIxODZhZDY0Il0sInNjb3BlIjoicmVsZWFzZS1ub3RlcyJ9.nrMAYOvxhZC6FLK_qHlJAWgWyx6flmPzaRFdbOwMl1qsW4he-eJetSpk7F3YL4_crjVYDpXtiJcKqNb2j-p5Qd-bHz8SOsyk_5h_T1gGq7xJw697CuCnB0HG_7ARVyb9lxL56BWegOoC3cot2UmZlXPSbiowJ92lbDQ0JcUpoAlAWJSr6rx7OsblZjAsr3hmDIMv1iDGjO4OZwkoZZSw_XuMowgTbckGsCnpnyO8PlsxYTTYTE1OqTCoJIRCK_pkEcdc6jh3O-lTKS8NELIjocLaXNJbzyKm_01ifpMZNNmuXO6CwTm7cW4sGIE18q1s2wiD8JO8qYHDFVwf0AgBGA",
-        # )
-        self.access_token="eyJhbGciOiJSUzI1NiIsImtpZCI6IjEiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJodHRwczovL2lkLnRyaW1ibGUuY29tIiwiZXhwIjoxNzQ1MzM3MTcwLCJuYmYiOjE3NDUzMzM1NzAsImlhdCI6MTc0NTMzMzU3MCwianRpIjoiYzdhM2ZmMDkxMmRiNGI0MmEzMWE1MDVjZTNkZmMyNzgiLCJqd3RfdmVyIjoyLCJzdWIiOiIwYzhkOGUwZC02MDU4LTQ2MGItYjExYS0xYTExMjE4NmFkNjQiLCJhcHBsaWNhdGlvbl9uYW1lIjoicmVsZWFzZS1ub3RlcyIsImlkZW50aXR5X3R5cGUiOiJhcHBsaWNhdGlvbiIsImF1dGhfdGltZSI6MTc0NTMzMzU3MCwiYW1yIjpbImNsaWVudF9jcmVkZW50aWFscyJdLCJhdWQiOlsiMGM4ZDhlMGQtNjA1OC00NjBiLWIxMWEtMWExMTIxODZhZDY0Il0sInNjb3BlIjoicmVsZWFzZS1ub3RlcyJ9.nrMAYOvxhZC6FLK_qHlJAWgWyx6flmPzaRFdbOwMl1qsW4he-eJetSpk7F3YL4_crjVYDpXtiJcKqNb2j-p5Qd-bHz8SOsyk_5h_T1gGq7xJw697CuCnB0HG_7ARVyb9lxL56BWegOoC3cot2UmZlXPSbiowJ92lbDQ0JcUpoAlAWJSr6rx7OsblZjAsr3hmDIMv1iDGjO4OZwkoZZSw_XuMowgTbckGsCnpnyO8PlsxYTTYTE1OqTCoJIRCK_pkEcdc6jh3O-lTKS8NELIjocLaXNJbzyKm_01ifpMZNNmuXO6CwTm7cW4sGIE18q1s2wiD8JO8qYHDFVwf0AgBGA"
+        self.access_token = os.environ.get("TA_Token", "")
         self.headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
