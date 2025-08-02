@@ -20,10 +20,17 @@ google-auth-oauthlib>=1.0.0
 PyGithub>=1.58.2
 
 # File search and system operations
-pyeverything>=0.1.2
+# pyeverything>=0.1.2  # Currently unavailable on PyPI, commented out
 
 # Persistence and scheduling
 APScheduler>=3.10.1
+tzlocal>=5.3.1
+
+# Async HTTP client (for MCP functionality)
+aiohttp>=3.12.15
+
+# Windows COM support (for text-to-speech and Outlook integration)
+comtypes>=1.4.11
 
 # Development and testing
 pytest>=7.3.1
