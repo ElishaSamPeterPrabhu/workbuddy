@@ -86,7 +86,7 @@ class AIClient:
     AI client for communicating with the backend API and generating responses.
     """
 
-    def __init__(self, model_name: str = "gpt-4o-mini") -> None:
+    def __init__(self, model_name: str = "gpt-4o") -> None:
         """
         Initialize the AI client.
 
@@ -97,15 +97,18 @@ class AIClient:
 
         # Trimble API setup
         self.assistant_id = "work-buddy"
-        self.base_url = f"https://agw.construction-integration.trimble.cloud/trimbledeveloperprogram/assistants/v1/agents/{self.assistant_id}/messages"
+        self.base_url = f"https://api.assistant.trimble.cloud/trimbledeveloperprogram/assistants/v1/agents/{self.assistant_id}/messages"
+            
         self.access_token = os.environ.get("TA_Token", "")
+        print(f"DEBUG: Access token: {self.access_token}")  
         self.headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
+            'accept': 'text/event-stream, text/event-stream'
         }
 
         # For session tracking
-        self.session_id = "session_id1"
+        self.session_id = "session_id"
         self.interlocutor_id = "interlocutor_id"
 
         # Get user path information
@@ -354,7 +357,6 @@ When the user wants to continue a search, include a "continue_search" field in y
             payload = {
                 "message": message,
                 "session_id": self.session_id,
-                "interlocutor_id": self.interlocutor_id,
                 "stream": False,
                 "model_id": self.model_name
             }
