@@ -158,9 +158,9 @@ class MorningBriefing:
         
         cursor.execute("""
             SELECT * FROM reminders 
-            WHERE reminder_time BETWEEN ? AND ? 
-            AND is_completed = 0
-            ORDER BY reminder_time
+            WHERE remind_at BETWEEN ? AND ? 
+            AND is_done = 0
+            ORDER BY remind_at
         """, (today_start, today_end))
         
         reminders = cursor.fetchall()

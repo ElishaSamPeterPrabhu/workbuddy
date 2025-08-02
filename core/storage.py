@@ -15,6 +15,11 @@ def get_connection() -> sqlite3.Connection:
     return sqlite3.connect(DB_PATH)
 
 
+def get_db_connection() -> sqlite3.Connection:
+    """Alias for get_connection for compatibility."""
+    return get_connection()
+
+
 def init_db() -> None:
     """Initialize the database tables if they do not exist."""
     with get_connection() as conn:
@@ -46,6 +51,16 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 message TEXT NOT NULL,
                 shown_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                key TEXT UNIQUE NOT NULL,
+                value TEXT NOT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
@@ -175,3 +190,38 @@ def get_notifications() -> List[Tuple[int, str, str, str]]:
             "SELECT id, title, message, shown_at FROM notifications ORDER BY shown_at DESC"
         )
         return c.fetchall()
+
+
+# User preference functions
+def get_user_preference(key: str, default_value: Any = None) -> Any:
+    """Get a user preference value."""
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT value FROM user_preferences WHERE key = ?", (key,))
+        result = c.fetchone()
+        if result:
+            # Try to parse as JSON for complex types
+            import json
+            try:
+                return json.loads(result[0])
+            except:
+                return result[0]
+        return default_value
+
+
+def set_user_preference(key: str, value: Any) -> None:
+    """Set a user preference value."""
+    import json
+    # Convert value to JSON string for storage
+    if isinstance(value, (dict, list)):
+        value_str = json.dumps(value)
+    else:
+        value_str = str(value)
+    
+    with get_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT OR REPLACE INTO user_preferences (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+            (key, value_str)
+        )
+        conn.commit()
