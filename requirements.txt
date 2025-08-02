@@ -32,6 +32,10 @@ aiohttp>=3.12.15
 # Windows COM support (for text-to-speech and Outlook integration)
 comtypes>=1.4.11
 
+# Additional dependencies discovered during testing
+winotify>=1.1.0
+python-dateutil>=2.9.0
+
 # Development and testing
 pytest>=7.3.1
 pytest-mock>=3.10.0
