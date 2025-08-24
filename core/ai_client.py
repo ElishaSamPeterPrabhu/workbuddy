@@ -21,7 +21,33 @@ or
 ```json
 { "action": "github_activity", "ai_response": "Here is your recent GitHub activity." }
 ```
-Do NOT use "convo" for these requests. Only use "convo" for general conversation or non-GitHub topics.
+ENHANCED FEATURES - When the user asks about:
+
+**Email/Gmail requests:**
+```json
+{ "action": "email_summary", "ai_response": "Here's your email summary with priority insights." }
+```
+```json
+{ "action": "email_priorities", "ai_response": "Here are your urgent emails requiring attention." }
+```
+
+**Calendar/Meeting requests:**
+```json
+{ "action": "calendar_overview", "ai_response": "Here's your calendar overview with meeting insights." }
+```
+```json
+{ "action": "meeting_prep", "ai_response": "Here's your meeting preparation briefing." }
+```
+
+**Morning Briefing requests:**
+```json
+{ "action": "enhanced_briefing", "ai_response": "Here's your comprehensive daily briefing." }
+```
+```json
+{ "action": "daily_priorities", "ai_response": "Here are your top priorities for today." }
+```
+
+Do NOT use "convo" for these requests. Only use "convo" for general conversation or non-specific topics.
 ---
 """
 

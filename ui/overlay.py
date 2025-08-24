@@ -1131,8 +1131,14 @@ class OverlayWindow(QDialog):
                         "github_activity", "github_prs_for_repo"
                     ]
                     
-                    # If not a GitHub action, display the AI's response text
-                    if not is_github_action and "ai_response" in json_obj:
+                    # Enhanced features actions
+                    is_enhanced_action = "action" in json_obj and json_obj["action"] in [
+                        "email_summary", "email_priorities", "calendar_overview", 
+                        "meeting_prep", "enhanced_briefing", "daily_priorities"
+                    ]
+                    
+                    # If not a GitHub or enhanced action, display the AI's response text
+                    if not is_github_action and not is_enhanced_action and "ai_response" in json_obj:
                         ai_response = json_obj.get("ai_response", "")
                         if ai_response:
                             self._append_ai_message(ai_response)
@@ -1273,6 +1279,106 @@ class OverlayWindow(QDialog):
                         print(f"DEBUG: Deleted reminder id={reminder_id}")
                     except Exception as e:
                         print(f"ERROR deleting reminder: {e}")
+                
+                # Handle enhanced features actions
+                elif action in ["email_summary", "email_priorities", "calendar_overview", "meeting_prep", "enhanced_briefing", "daily_priorities"]:
+                    print(f"DEBUG: Processing enhanced action: {action}")
+                    try:
+                        # Import enhanced features
+                        from core.enhanced_morning_briefing import EnhancedMorningBriefing
+                        enhanced_briefing = EnhancedMorningBriefing()
+                        
+                        result = None
+                        formatted_result = ""
+                        
+                        if action == "email_summary":
+                            email_briefing = enhanced_briefing.get_email_priority_briefing()
+                            if email_briefing.get('type') == 'error':
+                                formatted_result = "Sorry, I couldn't access your email summary right now."
+                            else:
+                                formatted_result = email_briefing.get('briefing_text', 'No email data available.')
+                        
+                        elif action == "email_priorities":
+                            email_briefing = enhanced_briefing.get_email_priority_briefing()
+                            if email_briefing.get('type') == 'error':
+                                formatted_result = "Sorry, I couldn't access your priority emails right now."
+                            else:
+                                urgent_count = email_briefing.get('urgent_count', 0)
+                                total_count = email_briefing.get('total_count', 0)
+                                if urgent_count > 0:
+                                    formatted_result = f"🚨 You have {urgent_count} urgent emails out of {total_count} total. {email_briefing.get('briefing_text', '')}"
+                                else:
+                                    formatted_result = f"✅ No urgent emails! You have {total_count} emails, but none require immediate attention."
+                        
+                        elif action == "calendar_overview":
+                            try:
+                                from core.enhanced_calendar_collector import EnhancedCalendarCollector
+                                calendar_collector = EnhancedCalendarCollector()
+                                calendar_data = calendar_collector.get_calendar_summary_data()
+                                
+                                today_events = len(calendar_data.get('today_events', []))
+                                prep_needed = len(calendar_data.get('meetings_needing_prep', []))
+                                
+                                if today_events == 0:
+                                    formatted_result = "📅 Your calendar is clear today - no scheduled events."
+                                else:
+                                    formatted_result = f"📅 Calendar Overview: You have {today_events} events today."
+                                    if prep_needed > 0:
+                                        formatted_result += f" {prep_needed} meetings may need preparation."
+                            except Exception as e:
+                                formatted_result = "Sorry, I couldn't access your calendar right now."
+                        
+                        elif action == "meeting_prep":
+                            meeting_briefing = enhanced_briefing.get_meeting_preparation_briefing()
+                            if meeting_briefing.get('type') == 'error':
+                                formatted_result = "Sorry, I couldn't access meeting preparation info right now."
+                            elif meeting_briefing.get('type') == 'no_prep_needed':
+                                formatted_result = "✅ No meetings requiring preparation found."
+                            else:
+                                meeting_summary = meeting_briefing.get('meeting_summary', '')
+                                prep_briefing = meeting_briefing.get('preparation_briefing', {})
+                                prep_time = meeting_briefing.get('estimated_prep_time', 10)
+                                
+                                formatted_result = f"📋 Meeting Preparation for: {meeting_summary}\n"
+                                formatted_result += f"⏱️ Estimated prep time: {prep_time} minutes\n\n"
+                                formatted_result += prep_briefing.get('briefing', 'No specific preparation guidance available.')
+                        
+                        elif action == "enhanced_briefing":
+                            briefing_data = enhanced_briefing.generate_enhanced_briefing()
+                            formatted_result = briefing_data.get('briefing_text', 'Enhanced briefing not available.')
+                        
+                        elif action == "daily_priorities":
+                            briefing_summary = enhanced_briefing.get_briefing_summary()
+                            if 'error' in briefing_summary:
+                                formatted_result = "Sorry, I couldn't determine your daily priorities right now."
+                            else:
+                                email_counts = briefing_summary.get('email_counts', {})
+                                calendar_counts = briefing_summary.get('calendar_counts', {})
+                                
+                                priorities = []
+                                if email_counts.get('urgent_action_required', 0) > 0:
+                                    priorities.append(f"📧 Address {email_counts['urgent_action_required']} urgent emails")
+                                if calendar_counts.get('prep_needed', 0) > 0:
+                                    priorities.append(f"📅 Prepare for {calendar_counts['prep_needed']} meetings")
+                                if calendar_counts.get('today_events', 0) > 0:
+                                    priorities.append(f"🗓️ Attend {calendar_counts['today_events']} scheduled events")
+                                
+                                if priorities:
+                                    formatted_result = "🎯 Your top priorities today:\n\n" + "\n".join(f"{i+1}. {p}" for i, p in enumerate(priorities))
+                                else:
+                                    formatted_result = "✨ You have a light schedule today! No urgent priorities detected."
+                        
+                        # Display the formatted result
+                        if formatted_result:
+                            self._append_ai_message(formatted_result)
+                        else:
+                            self._append_ai_message("Enhanced feature processing completed.")
+                            
+                    except ImportError:
+                        self._append_ai_message("Enhanced features are not available. Please check your configuration.")
+                    except Exception as e:
+                        print(f"DEBUG: Enhanced action error: {e}")
+                        self._append_ai_message(f"Sorry, there was an issue processing your {action.replace('_', ' ')} request.")
                 
                 # Handle GitHub actions
                 elif action in ["github_notifications", "github_prs", "github_repos", "github_activity", "github_prs_for_repo"]:
