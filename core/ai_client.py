@@ -108,7 +108,7 @@ class AIClient:
         }
 
         # For session tracking
-        self.session_id = "session_id"
+        self.session_id = "session_id2wieowieowie"
         self.interlocutor_id = "interlocutor_id"
 
         # Get user path information
@@ -216,6 +216,64 @@ When the user wants to continue a search, include a "continue_search" field in y
         self.last_search_context_str = ""
         self.logger = logging.getLogger(__name__)
 
+    def validate_token(self) -> dict[str, Any]:
+        """
+        Validate the current access token.
+        
+        Returns:
+            Dictionary with validation status and details.
+        """
+        if not self.access_token:
+            return {
+                "valid": False,
+                "error": "No token found",
+                "message": "Please set TA_Token or TRIMBLE_API_TOKEN environment variable"
+            }
+        
+        try:
+            # Test the token with a simple API call
+            test_message = "token validation test"
+            body = {
+                "message": test_message,
+                "session_id": "validation-test",
+                "model_id": self.model_name,
+                "max_tokens": None,
+                "temperature": None
+            }
+            
+            response = requests.post(
+                self.base_url,
+                headers=self.headers,
+                json=body,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                return {
+                    "valid": True,
+                    "message": "Token is valid"
+                }
+            elif response.status_code == 401:
+                return {
+                    "valid": False,
+                    "error": "Unauthorized",
+                    "message": "Token is invalid or expired",
+                    "details": response.json() if response.text else None
+                }
+            else:
+                return {
+                    "valid": False,
+                    "error": f"HTTP {response.status_code}",
+                    "message": response.text
+                }
+                
+        except Exception as e:
+            return {
+                "valid": False,
+                "error": str(type(e).__name__),
+                "message": str(e)
+            }
+
     def get_current_iso_time(self) -> str:
         """Return the current time in ISO 8601 format with timezone."""
         return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -237,7 +295,6 @@ When the user wants to continue a search, include a "continue_search" field in y
             body = {
                 "message": message,
                 "session_id": self.session_id,
-                "interlocutor_id": self.interlocutor_id,
                 "stream": False,
                 "model_id": self.model_name,
             }
@@ -373,7 +430,16 @@ When the user wants to continue a search, include a "continue_search" field in y
             if response.status_code == 200:
                 response_data = response.json()
                 if "message" in response_data:
-                    return response_data["message"]
+                    message = response_data["message"]
+                    
+                    # Clean up markdown code blocks if present
+                    if message.strip().startswith("```json") and message.strip().endswith("```"):
+                        # Extract JSON from markdown code block
+                        lines = message.strip().split('\n')
+                        json_content = '\n'.join(lines[1:-1])  # Remove first and last lines
+                        return json_content.strip()
+                    
+                    return message
                 else:
                     return json.dumps({
                         "ai_response": "Received response from AI service but couldn't find expected content."

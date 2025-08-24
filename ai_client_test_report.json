@@ -1,0 +1,84 @@
+[
+  {
+    "test": "Simple Greeting",
+    "success": true,
+    "expected": "convo",
+    "actual": "convo",
+    "response": {
+      "action": "convo",
+      "is_reminder": false,
+      "ai_response": "This is a mock response to: Hello"
+    }
+  },
+  {
+    "test": "Reminder Creation",
+    "success": false,
+    "expected": "create",
+    "actual": "convo",
+    "response": {
+      "action": "convo",
+      "is_reminder": false,
+      "ai_response": "This is a mock response to: Remind me to check email at 3pm today\n\ncurrent_time: 2024-01-02T10:00:00"
+    }
+  },
+  {
+    "test": "View Reminders",
+    "success": false,
+    "expected": "view",
+    "actual": "convo",
+    "response": {
+      "action": "convo",
+      "is_reminder": false,
+      "ai_response": "This is a mock response to: Show me my reminders"
+    }
+  },
+  {
+    "test": "GitHub Notifications",
+    "success": false,
+    "expected": "github_notifications",
+    "actual": "convo",
+    "response": {
+      "action": "convo",
+      "is_reminder": false,
+      "ai_response": "This is a mock response to: Show my GitHub notifications"
+    }
+  },
+  {
+    "test": "GitHub PRs",
+    "success": false,
+    "expected": "github_prs",
+    "actual": "convo",
+    "response": {
+      "action": "convo",
+      "is_reminder": false,
+      "ai_response": "This is a mock response to: Show my pull requests"
+    }
+  },
+  {
+    "test": "Morning Briefing",
+    "success": false,
+    "expected": "morning_briefing",
+    "actual": "convo",
+    "response": {
+      "action": "convo",
+      "is_reminder": false,
+      "ai_response": "This is a mock response to: Give me my morning briefing"
+    }
+  },
+  {
+    "test": "File Search",
+    "success": true,
+    "expected": "convo",
+    "actual": "convo",
+    "response": {
+      "action": "convo",
+      "is_reminder": false,
+      "ai_response": "I'll search for files containing 'project' in your Documents folder.",
+      "file_search": {
+        "action": "search_files_recursive",
+        "pattern": "*project*",
+        "directory": "C:\\Users\\eprabhu\\Documents"
+      }
+    }
+  }
+]
